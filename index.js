@@ -18,25 +18,36 @@ const allowedOrigins = [
   process.env.FRONTEND_URL
 ].filter(Boolean);
 
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "https://bpgroup-panel.vercel.app",
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(
   cors({
     origin: function (origin, callback) {
-      console.log("ORIGIN:", origin);
-      if (!origin) {
-        return callback(null, true);
-      } 
-      if (allowedOrigins.includes(origin)) {
+      if (!origin) return callback(null, true);
+
+      const isAllowed =
+        allowedOrigins.includes(origin) ||
+        origin.endsWith(".vercel.app");
+
+      if (isAllowed) {
         return callback(null, true);
       }
+
       return callback(new Error(`No permitido por CORS: ${origin}`));
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true
-  
   })
 );
-app.options("*", cors());
+
+app.options(/.*/, cors());
+
 app.use(express.json());
 
 const uploadsDir = path.join(__dirname, "uploads");
