@@ -11,11 +11,11 @@ const pool = require("./db");
 
 const app = express();
 
-
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "https://bpgroup-panel.vercel.app",
+  "https://panel.bpgroup.mx",
   process.env.FRONTEND_URL
 ].filter(Boolean);
 
@@ -25,12 +25,9 @@ app.use(
       if (!origin) return callback(null, true);
 
       const isAllowed =
-        allowedOrigins.includes(origin) ||
-        origin.endsWith(".vercel.app");
+        allowedOrigins.includes(origin) || origin.endsWith(".vercel.app");
 
-      if (isAllowed) {
-        return callback(null, true);
-      }
+      if (isAllowed) return callback(null, true);
 
       return callback(new Error(`No permitido por CORS: ${origin}`));
     },
@@ -41,7 +38,6 @@ app.use(
 );
 
 app.options(/.*/, cors());
-
 app.use(express.json());
 
 const uploadsDir = path.join(__dirname, "uploads");
@@ -122,12 +118,20 @@ function authMiddleware(req, res, next) {
   }
 }
 
-function adminOnly(req, res, next) {
-  if (req.user.role !== "admin") {
-    return res.status(403).json({ error: "Acceso denegado: solo admin" });
-  }
+function allowRoles(...roles) {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res
+        .status(403)
+        .json({ error: "No tienes permiso para esta acción" });
+    }
 
-  next();
+    next();
+  };
+}
+
+function adminOnly(req, res, next) {
+  return allowRoles("admin")(req, res, next);
 }
 
 /* =========================
@@ -204,7 +208,7 @@ app.get("/create-tables", async (req, res) => {
         name VARCHAR(100) NOT NULL,
         email VARCHAR(120) UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        role VARCHAR(20) NOT NULL DEFAULT 'operator',
+        role VARCHAR(30) NOT NULL DEFAULT 'viewer',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -278,12 +282,14 @@ app.get("/create-tables", async (req, res) => {
         cut_month INT NOT NULL,
         color VARCHAR(50),
         boxes_produced NUMERIC(12,2) NOT NULL DEFAULT 0,
-        price_per_box NUMERIC(12,2) NOT NULL DEFAULT 0,
+        price_per_box NUMERIC(12,2) DEFAULT 0,
         buyer_company TEXT,
         box_design TEXT,
-        gross_income NUMERIC(12,2) NOT NULL DEFAULT 0,
+        gross_income NUMERIC(12,2) DEFAULT 0,
         observation TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        status VARCHAR(30) NOT NULL DEFAULT 'PENDIENTE_FINANZAS',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
@@ -310,10 +316,18 @@ app.get("/create-tables", async (req, res) => {
 
 app.get("/fix-assets-schema", async (req, res) => {
   try {
-    await pool.query(`ALTER TABLE assets ADD COLUMN IF NOT EXISTS observation TEXT;`);
-    await pool.query(`ALTER TABLE assets ADD COLUMN IF NOT EXISTS numero_asignado VARCHAR(50);`);
-    await pool.query(`ALTER TABLE assets ADD COLUMN IF NOT EXISTS code_number VARCHAR(20);`);
-    await pool.query(`ALTER TABLE assets ADD COLUMN IF NOT EXISTS image_url TEXT;`);
+    await pool.query(
+      `ALTER TABLE assets ADD COLUMN IF NOT EXISTS observation TEXT;`
+    );
+    await pool.query(
+      `ALTER TABLE assets ADD COLUMN IF NOT EXISTS numero_asignado VARCHAR(50);`
+    );
+    await pool.query(
+      `ALTER TABLE assets ADD COLUMN IF NOT EXISTS code_number VARCHAR(20);`
+    );
+    await pool.query(
+      `ALTER TABLE assets ADD COLUMN IF NOT EXISTS image_url TEXT;`
+    );
 
     res.send("Schema de assets actualizado correctamente");
   } catch (err) {
@@ -366,14 +380,41 @@ app.get("/fix-farms-schema", async (req, res) => {
         cut_month INT NOT NULL,
         color VARCHAR(50),
         boxes_produced NUMERIC(12,2) NOT NULL DEFAULT 0,
-        price_per_box NUMERIC(12,2) NOT NULL DEFAULT 0,
+        price_per_box NUMERIC(12,2) DEFAULT 0,
         buyer_company TEXT,
         box_design TEXT,
-        gross_income NUMERIC(12,2) NOT NULL DEFAULT 0,
+        gross_income NUMERIC(12,2) DEFAULT 0,
         observation TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        status VARCHAR(30) NOT NULL DEFAULT 'PENDIENTE_FINANZAS',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'PENDIENTE_FINANZAS';
+    `);
+
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+    `);
+
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ALTER COLUMN price_per_box DROP NOT NULL;
+    `).catch(() => {});
+
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ALTER COLUMN gross_income DROP NOT NULL;
+    `).catch(() => {});
+
+    await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS role VARCHAR(30) NOT NULL DEFAULT 'viewer';
+    `).catch(() => {});
 
     await pool.query(`
       ALTER TABLE farms
@@ -387,7 +428,7 @@ app.get("/fix-farms-schema", async (req, res) => {
 });
 
 /* =========================
-   AUTH
+   AUTH / USUARIOS
 ========================= */
 
 app.post("/create-admin", async (req, res) => {
@@ -429,6 +470,114 @@ app.post("/create-admin", async (req, res) => {
   }
 });
 
+app.post(
+  "/users",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const { name, email, password, role } = req.body;
+
+      const validRoles = ["admin", "agricola", "finanzas", "inventario", "viewer"];
+
+      if (!name || !email || !password || !role) {
+        return res.status(400).json({
+          error: "name, email, password y role son obligatorios"
+        });
+      }
+
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({
+          error: "Rol inválido"
+        });
+      }
+
+      const existingUser = await pool.query(
+        "SELECT id FROM users WHERE email = $1",
+        [email]
+      );
+
+      if (existingUser.rows.length > 0) {
+        return res.status(400).json({ error: "Ese email ya existe" });
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      const result = await pool.query(
+        `
+        INSERT INTO users (name, email, password_hash, role)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, name, email, role, created_at
+        `,
+        [name, email, passwordHash, role]
+      );
+
+      res.status(201).json({
+        message: "Usuario creado correctamente",
+        user: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.get(
+  "/users",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT id, name, email, role, created_at
+        FROM users
+        ORDER BY id ASC
+      `);
+
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.put(
+  "/users/:id/role",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const { role } = req.body;
+      const validRoles = ["admin", "agricola", "finanzas", "inventario", "viewer"];
+
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ error: "Rol inválido" });
+      }
+
+      const result = await pool.query(
+        `
+        UPDATE users
+        SET role = $1
+        WHERE id = $2
+        RETURNING id, name, email, role, created_at
+        `,
+        [role, req.params.id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Usuario no encontrado" });
+      }
+
+      res.json({
+        message: "Rol actualizado correctamente",
+        user: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -439,10 +588,9 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    const result = await pool.query(
-      "SELECT * FROM users WHERE email = $1",
-      [email]
-    );
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
+      email
+    ]);
 
     if (result.rows.length === 0) {
       return res.status(401).json({ error: "Credenciales inválidas" });
@@ -502,513 +650,563 @@ app.get("/me", authMiddleware, async (req, res) => {
    VEHÍCULOS
 ========================= */
 
-app.post("/assets", authMiddleware, async (req, res) => {
-  try {
-    const {
-      type,
-      code_number,
-      brand,
-      model,
-      year,
-      function: assetFunction,
-      responsible,
-      observation,
-      numero_asignado
-    } = req.body;
-
-    if (!type || !assetFunction || !code_number) {
-      return res.status(400).json({
-        error: "type, function y code_number son obligatorios"
-      });
-    }
-
-    const code = buildCode(type, assetFunction, code_number);
-
-    if (!code) {
-      return res.status(400).json({
-        error: "No se pudo generar el código"
-      });
-    }
-
-    const exists = await pool.query(
-      "SELECT id FROM assets WHERE code = $1",
-      [code]
-    );
-
-    if (exists.rows.length > 0) {
-      return res.status(400).json({
-        error: "Ya existe un vehículo con ese código"
-      });
-    }
-
-    const result = await pool.query(
-      `
-      INSERT INTO assets
-      (code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      RETURNING id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
-      `,
-      [
-        code,
+app.post(
+  "/assets",
+  authMiddleware,
+  allowRoles("admin", "inventario"),
+  async (req, res) => {
+    try {
+      const {
         type,
-        String(code_number).toUpperCase(),
-        brand || null,
-        model || null,
-        year || null,
-        assetFunction || null,
-        responsible || null,
-        observation || null,
-        numero_asignado || null,
-        null
-      ]
-    );
+        code_number,
+        brand,
+        model,
+        year,
+        function: assetFunction,
+        responsible,
+        observation,
+        numero_asignado
+      } = req.body;
 
-    res.status(201).json({
-      message: "Vehículo creado correctamente",
-      asset: result.rows[0]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/assets/:id/photo", authMiddleware, upload.single("photo"), async (req, res) => {
-  try {
-    const existing = await pool.query(
-      "SELECT id FROM assets WHERE id = $1",
-      [req.params.id]
-    );
-
-    if (existing.rows.length === 0) {
-      return res.status(404).json({ error: "Vehículo no encontrado" });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ error: "No se recibió ninguna foto" });
-    }
-
-    const imageUrl = `/uploads/${req.file.filename}`;
-
-    const result = await pool.query(
-      `
-      UPDATE assets
-      SET image_url = $1,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2
-      RETURNING id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
-      `,
-      [imageUrl, req.params.id]
-    );
-
-    res.json({
-      message: "Foto subida correctamente",
-      asset: result.rows[0]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/assets", authMiddleware, async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
-      FROM assets
-      ORDER BY id ASC
-    `);
-
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/assets/:id", authMiddleware, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `
-      SELECT id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
-      FROM assets
-      WHERE id = $1
-      `,
-      [req.params.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Vehículo no encontrado" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put("/assets/:id", authMiddleware, async (req, res) => {
-  try {
-    const {
-      type,
-      code_number,
-      brand,
-      model,
-      year,
-      function: assetFunction,
-      responsible,
-      observation,
-      numero_asignado
-    } = req.body;
-
-    const existing = await pool.query(
-      "SELECT * FROM assets WHERE id = $1",
-      [req.params.id]
-    );
-
-    if (existing.rows.length === 0) {
-      return res.status(404).json({ error: "Vehículo no encontrado" });
-    }
-
-    const current = existing.rows[0];
-
-    const newType = type ?? current.type;
-    const newCodeNumber = code_number ?? current.code_number;
-    const newBrand = brand ?? current.brand;
-    const newModel = model ?? current.model;
-    const newYear = year ?? current.year;
-    const newFunction = assetFunction ?? current.function;
-    const newResponsible = responsible ?? current.responsible;
-    const newObservation = observation ?? current.observation;
-    const newNumeroAsignado = numero_asignado ?? current.numero_asignado;
-
-    const newCode = buildCode(newType, newFunction, newCodeNumber);
-
-    if (!newCode) {
-      return res.status(400).json({
-        error: "No se pudo generar el código"
-      });
-    }
-
-    if (newCode !== current.code) {
-      const codeExists = await pool.query(
-        "SELECT id FROM assets WHERE code = $1 AND id <> $2",
-        [newCode, req.params.id]
-      );
-
-      if (codeExists.rows.length > 0) {
+      if (!type || !assetFunction || !code_number) {
         return res.status(400).json({
-          error: "Ya existe otro vehículo con ese código"
+          error: "type, function y code_number son obligatorios"
         });
       }
-    }
 
-    const result = await pool.query(
-      `
-      UPDATE assets
-      SET code = $1,
-          type = $2,
-          code_number = $3,
-          brand = $4,
-          model = $5,
-          year = $6,
-          function = $7,
-          responsible = $8,
-          observation = $9,
-          numero_asignado = $10,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $11
-      RETURNING id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
-      `,
-      [
-        newCode,
-        newType,
-        String(newCodeNumber).toUpperCase(),
-        newBrand,
-        newModel,
-        newYear,
-        newFunction,
-        newResponsible,
-        newObservation,
-        newNumeroAsignado,
+      const code = buildCode(type, assetFunction, code_number);
+
+      if (!code) {
+        return res.status(400).json({
+          error: "No se pudo generar el código"
+        });
+      }
+
+      const exists = await pool.query("SELECT id FROM assets WHERE code = $1", [
+        code
+      ]);
+
+      if (exists.rows.length > 0) {
+        return res.status(400).json({
+          error: "Ya existe un vehículo con ese código"
+        });
+      }
+
+      const result = await pool.query(
+        `
+        INSERT INTO assets
+        (code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        RETURNING id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
+        `,
+        [
+          code,
+          type,
+          String(code_number).toUpperCase(),
+          brand || null,
+          model || null,
+          year || null,
+          assetFunction || null,
+          responsible || null,
+          observation || null,
+          numero_asignado || null,
+          null
+        ]
+      );
+
+      res.status(201).json({
+        message: "Vehículo creado correctamente",
+        asset: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.post(
+  "/assets/:id/photo",
+  authMiddleware,
+  allowRoles("admin", "inventario"),
+  upload.single("photo"),
+  async (req, res) => {
+    try {
+      const existing = await pool.query("SELECT id FROM assets WHERE id = $1", [
         req.params.id
-      ]
-    );
+      ]);
 
-    res.json({
-      message: "Vehículo actualizado correctamente",
-      asset: result.rows[0]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Vehículo no encontrado" });
+      }
 
-app.delete("/assets/:id", authMiddleware, adminOnly, async (req, res) => {
-  try {
-    const existing = await pool.query(
-      "SELECT * FROM assets WHERE id = $1",
-      [req.params.id]
-    );
+      if (!req.file) {
+        return res.status(400).json({ error: "No se recibió ninguna foto" });
+      }
 
-    if (existing.rows.length === 0) {
-      return res.status(404).json({ error: "Vehículo no encontrado" });
+      const imageUrl = `/uploads/${req.file.filename}`;
+
+      const result = await pool.query(
+        `
+        UPDATE assets
+        SET image_url = $1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        RETURNING id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
+        `,
+        [imageUrl, req.params.id]
+      );
+
+      res.json({
+        message: "Foto subida correctamente",
+        asset: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    await pool.query("DELETE FROM assets WHERE id = $1", [req.params.id]);
-
-    res.json({
-      message: "Vehículo eliminado correctamente"
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
+);
+
+app.get(
+  "/assets",
+  authMiddleware,
+  allowRoles("admin", "inventario", "viewer"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
+        FROM assets
+        ORDER BY id ASC
+      `);
+
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.get(
+  "/assets/:id",
+  authMiddleware,
+  allowRoles("admin", "inventario", "viewer"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `
+        SELECT id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
+        FROM assets
+        WHERE id = $1
+        `,
+        [req.params.id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Vehículo no encontrado" });
+      }
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.put(
+  "/assets/:id",
+  authMiddleware,
+  allowRoles("admin", "inventario"),
+  async (req, res) => {
+    try {
+      const {
+        type,
+        code_number,
+        brand,
+        model,
+        year,
+        function: assetFunction,
+        responsible,
+        observation,
+        numero_asignado
+      } = req.body;
+
+      const existing = await pool.query("SELECT * FROM assets WHERE id = $1", [
+        req.params.id
+      ]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Vehículo no encontrado" });
+      }
+
+      const current = existing.rows[0];
+
+      const newType = type ?? current.type;
+      const newCodeNumber = code_number ?? current.code_number;
+      const newBrand = brand ?? current.brand;
+      const newModel = model ?? current.model;
+      const newYear = year ?? current.year;
+      const newFunction = assetFunction ?? current.function;
+      const newResponsible = responsible ?? current.responsible;
+      const newObservation = observation ?? current.observation;
+      const newNumeroAsignado = numero_asignado ?? current.numero_asignado;
+
+      const newCode = buildCode(newType, newFunction, newCodeNumber);
+
+      if (!newCode) {
+        return res.status(400).json({
+          error: "No se pudo generar el código"
+        });
+      }
+
+      if (newCode !== current.code) {
+        const codeExists = await pool.query(
+          "SELECT id FROM assets WHERE code = $1 AND id <> $2",
+          [newCode, req.params.id]
+        );
+
+        if (codeExists.rows.length > 0) {
+          return res.status(400).json({
+            error: "Ya existe otro vehículo con ese código"
+          });
+        }
+      }
+
+      const result = await pool.query(
+        `
+        UPDATE assets
+        SET code = $1,
+            type = $2,
+            code_number = $3,
+            brand = $4,
+            model = $5,
+            year = $6,
+            function = $7,
+            responsible = $8,
+            observation = $9,
+            numero_asignado = $10,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $11
+        RETURNING id, code, type, code_number, brand, model, year, function, responsible, observation, numero_asignado, image_url, created_at, updated_at
+        `,
+        [
+          newCode,
+          newType,
+          String(newCodeNumber).toUpperCase(),
+          newBrand,
+          newModel,
+          newYear,
+          newFunction,
+          newResponsible,
+          newObservation,
+          newNumeroAsignado,
+          req.params.id
+        ]
+      );
+
+      res.json({
+        message: "Vehículo actualizado correctamente",
+        asset: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.delete(
+  "/assets/:id",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const existing = await pool.query("SELECT * FROM assets WHERE id = $1", [
+        req.params.id
+      ]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Vehículo no encontrado" });
+      }
+
+      await pool.query("DELETE FROM assets WHERE id = $1", [req.params.id]);
+
+      res.json({
+        message: "Vehículo eliminado correctamente"
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 /* =========================
    HUERTAS
 ========================= */
 
-app.post("/farms", authMiddleware, adminOnly, async (req, res) => {
-  try {
-    const {
-      code,
-      name,
-      estado,
-      region,
-      sector,
-      coordenadas,
-      maps_link,
-      hectareas,
-      numero_terrenos,
-      tipo_suelos,
-      variedad_banano,
-      edad_plantacion,
-      sistema_riego,
-      fuente_agua,
-      bomba_agua,
-      prop_medidor_elec,
-      empacadora,
-      a_favor_de,
-      produccion_est_mensual,
-      produccion_est_anual,
-      encargado,
-      telefono_encargado,
-      empresa_compradora
-    } = req.body;
-
-    if (!code || !name) {
-      return res.status(400).json({ error: "code y name son obligatorios" });
-    }
-
-    const exists = await pool.query(
-      "SELECT id FROM farms WHERE code = $1",
-      [code]
-    );
-
-    if (exists.rows.length > 0) {
-      return res.status(400).json({
-        error: "Ya existe una huerta con ese código"
-      });
-    }
-
-    const result = await pool.query(
-      `
-      INSERT INTO farms (
-        code, name, estado, region, sector, coordenadas, maps_link,
-        hectareas, numero_terrenos, tipo_suelos, variedad_banano, edad_plantacion,
-        sistema_riego, fuente_agua, bomba_agua, prop_medidor_elec,
-        empacadora, a_favor_de, produccion_est_mensual, produccion_est_anual,
-        encargado, telefono_encargado, empresa_compradora
-      )
-      VALUES (
-        $1,$2,$3,$4,$5,$6,$7,
-        $8,$9,$10,$11,$12,
-        $13,$14,$15,$16,
-        $17,$18,$19,$20,
-        $21,$22,$23
-      )
-      RETURNING *
-      `,
-      [
+app.post(
+  "/farms",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const {
         code,
         name,
-        estado || null,
-        region || null,
-        sector || null,
-        coordenadas || null,
-        maps_link || null,
-        hectareas || null,
-        numero_terrenos || null,
-        tipo_suelos || null,
-        variedad_banano || null,
-        edad_plantacion || null,
-        sistema_riego || null,
-        fuente_agua || null,
-        bomba_agua || null,
-        prop_medidor_elec || null,
-        empacadora || null,
-        a_favor_de || null,
-        produccion_est_mensual || null,
-        produccion_est_anual || null,
-        encargado || null,
-        telefono_encargado || null,
-        empresa_compradora || null
-      ]
-    );
+        estado,
+        region,
+        sector,
+        coordenadas,
+        maps_link,
+        hectareas,
+        numero_terrenos,
+        tipo_suelos,
+        variedad_banano,
+        edad_plantacion,
+        sistema_riego,
+        fuente_agua,
+        bomba_agua,
+        prop_medidor_elec,
+        empacadora,
+        a_favor_de,
+        produccion_est_mensual,
+        produccion_est_anual,
+        encargado,
+        telefono_encargado,
+        empresa_compradora
+      } = req.body;
 
-    res.status(201).json({
-      message: "Huerta creada correctamente",
-      farm: result.rows[0]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+      if (!code || !name) {
+        return res.status(400).json({ error: "code y name son obligatorios" });
+      }
 
-app.get("/farms", authMiddleware, async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM farms ORDER BY code ASC NULLS LAST, id ASC"
-    );
+      const exists = await pool.query("SELECT id FROM farms WHERE code = $1", [
+        code
+      ]);
 
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/farms/:id", authMiddleware, async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM farms WHERE id = $1",
-      [req.params.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Huerta no encontrada" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put("/farms/:id", authMiddleware, adminOnly, async (req, res) => {
-  try {
-    const existing = await pool.query(
-      "SELECT * FROM farms WHERE id = $1",
-      [req.params.id]
-    );
-
-    if (existing.rows.length === 0) {
-      return res.status(404).json({ error: "Huerta no encontrada" });
-    }
-
-    const current = existing.rows[0];
-
-    const data = {
-      code: req.body.code ?? current.code,
-      name: req.body.name ?? current.name,
-      estado: req.body.estado ?? current.estado,
-      region: req.body.region ?? current.region,
-      sector: req.body.sector ?? current.sector,
-      coordenadas: req.body.coordenadas ?? current.coordenadas,
-      maps_link: req.body.maps_link ?? current.maps_link,
-      hectareas: req.body.hectareas ?? current.hectareas,
-      numero_terrenos: req.body.numero_terrenos ?? current.numero_terrenos,
-      tipo_suelos: req.body.tipo_suelos ?? current.tipo_suelos,
-      variedad_banano: req.body.variedad_banano ?? current.variedad_banano,
-      edad_plantacion: req.body.edad_plantacion ?? current.edad_plantacion,
-      sistema_riego: req.body.sistema_riego ?? current.sistema_riego,
-      fuente_agua: req.body.fuente_agua ?? current.fuente_agua,
-      bomba_agua: req.body.bomba_agua ?? current.bomba_agua,
-      prop_medidor_elec: req.body.prop_medidor_elec ?? current.prop_medidor_elec,
-      empacadora: req.body.empacadora ?? current.empacadora,
-      a_favor_de: req.body.a_favor_de ?? current.a_favor_de,
-      produccion_est_mensual: req.body.produccion_est_mensual ?? current.produccion_est_mensual,
-      produccion_est_anual: req.body.produccion_est_anual ?? current.produccion_est_anual,
-      encargado: req.body.encargado ?? current.encargado,
-      telefono_encargado: req.body.telefono_encargado ?? current.telefono_encargado,
-      empresa_compradora: req.body.empresa_compradora ?? current.empresa_compradora
-    };
-
-    if (data.code !== current.code) {
-      const codeExists = await pool.query(
-        "SELECT id FROM farms WHERE code = $1 AND id <> $2",
-        [data.code, req.params.id]
-      );
-
-      if (codeExists.rows.length > 0) {
+      if (exists.rows.length > 0) {
         return res.status(400).json({
-          error: "Ya existe otra huerta con ese código"
+          error: "Ya existe una huerta con ese código"
         });
       }
+
+      const result = await pool.query(
+        `
+        INSERT INTO farms (
+          code, name, estado, region, sector, coordenadas, maps_link,
+          hectareas, numero_terrenos, tipo_suelos, variedad_banano, edad_plantacion,
+          sistema_riego, fuente_agua, bomba_agua, prop_medidor_elec,
+          empacadora, a_favor_de, produccion_est_mensual, produccion_est_anual,
+          encargado, telefono_encargado, empresa_compradora
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,
+          $8,$9,$10,$11,$12,
+          $13,$14,$15,$16,
+          $17,$18,$19,$20,
+          $21,$22,$23
+        )
+        RETURNING *
+        `,
+        [
+          code,
+          name,
+          estado || null,
+          region || null,
+          sector || null,
+          coordenadas || null,
+          maps_link || null,
+          hectareas || null,
+          numero_terrenos || null,
+          tipo_suelos || null,
+          variedad_banano || null,
+          edad_plantacion || null,
+          sistema_riego || null,
+          fuente_agua || null,
+          bomba_agua || null,
+          prop_medidor_elec || null,
+          empacadora || null,
+          a_favor_de || null,
+          produccion_est_mensual || null,
+          produccion_est_anual || null,
+          encargado || null,
+          telefono_encargado || null,
+          empresa_compradora || null
+        ]
+      );
+
+      res.status(201).json({
+        message: "Huerta creada correctamente",
+        farm: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    const result = await pool.query(
-      `
-      UPDATE farms
-      SET code = $1,
-          name = $2,
-          estado = $3,
-          region = $4,
-          sector = $5,
-          coordenadas = $6,
-          maps_link = $7,
-          hectareas = $8,
-          numero_terrenos = $9,
-          tipo_suelos = $10,
-          variedad_banano = $11,
-          edad_plantacion = $12,
-          sistema_riego = $13,
-          fuente_agua = $14,
-          bomba_agua = $15,
-          prop_medidor_elec = $16,
-          empacadora = $17,
-          a_favor_de = $18,
-          produccion_est_mensual = $19,
-          produccion_est_anual = $20,
-          encargado = $21,
-          telefono_encargado = $22,
-          empresa_compradora = $23
-      WHERE id = $24
-      RETURNING *
-      `,
-      [
-        data.code,
-        data.name,
-        data.estado,
-        data.region,
-        data.sector,
-        data.coordenadas,
-        data.maps_link,
-        data.hectareas,
-        data.numero_terrenos,
-        data.tipo_suelos,
-        data.variedad_banano,
-        data.edad_plantacion,
-        data.sistema_riego,
-        data.fuente_agua,
-        data.bomba_agua,
-        data.prop_medidor_elec,
-        data.empacadora,
-        data.a_favor_de,
-        data.produccion_est_mensual,
-        data.produccion_est_anual,
-        data.encargado,
-        data.telefono_encargado,
-        data.empresa_compradora,
-        req.params.id
-      ]
-    );
-
-    res.json({
-      message: "Huerta actualizada correctamente",
-      farm: result.rows[0]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
+);
+
+app.get(
+  "/farms",
+  authMiddleware,
+  allowRoles("admin", "agricola", "finanzas", "viewer"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        "SELECT * FROM farms ORDER BY code ASC NULLS LAST, id ASC"
+      );
+
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.get(
+  "/farms/:id",
+  authMiddleware,
+  allowRoles("admin", "agricola", "finanzas", "viewer"),
+  async (req, res) => {
+    try {
+      const result = await pool.query("SELECT * FROM farms WHERE id = $1", [
+        req.params.id
+      ]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Huerta no encontrada" });
+      }
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.put(
+  "/farms/:id",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const existing = await pool.query("SELECT * FROM farms WHERE id = $1", [
+        req.params.id
+      ]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Huerta no encontrada" });
+      }
+
+      const current = existing.rows[0];
+
+      const data = {
+        code: req.body.code ?? current.code,
+        name: req.body.name ?? current.name,
+        estado: req.body.estado ?? current.estado,
+        region: req.body.region ?? current.region,
+        sector: req.body.sector ?? current.sector,
+        coordenadas: req.body.coordenadas ?? current.coordenadas,
+        maps_link: req.body.maps_link ?? current.maps_link,
+        hectareas: req.body.hectareas ?? current.hectareas,
+        numero_terrenos: req.body.numero_terrenos ?? current.numero_terrenos,
+        tipo_suelos: req.body.tipo_suelos ?? current.tipo_suelos,
+        variedad_banano: req.body.variedad_banano ?? current.variedad_banano,
+        edad_plantacion: req.body.edad_plantacion ?? current.edad_plantacion,
+        sistema_riego: req.body.sistema_riego ?? current.sistema_riego,
+        fuente_agua: req.body.fuente_agua ?? current.fuente_agua,
+        bomba_agua: req.body.bomba_agua ?? current.bomba_agua,
+        prop_medidor_elec:
+          req.body.prop_medidor_elec ?? current.prop_medidor_elec,
+        empacadora: req.body.empacadora ?? current.empacadora,
+        a_favor_de: req.body.a_favor_de ?? current.a_favor_de,
+        produccion_est_mensual:
+          req.body.produccion_est_mensual ??
+          current.produccion_est_mensual,
+        produccion_est_anual:
+          req.body.produccion_est_anual ?? current.produccion_est_anual,
+        encargado: req.body.encargado ?? current.encargado,
+        telefono_encargado:
+          req.body.telefono_encargado ?? current.telefono_encargado,
+        empresa_compradora:
+          req.body.empresa_compradora ?? current.empresa_compradora
+      };
+
+      if (data.code !== current.code) {
+        const codeExists = await pool.query(
+          "SELECT id FROM farms WHERE code = $1 AND id <> $2",
+          [data.code, req.params.id]
+        );
+
+        if (codeExists.rows.length > 0) {
+          return res.status(400).json({
+            error: "Ya existe otra huerta con ese código"
+          });
+        }
+      }
+
+      const result = await pool.query(
+        `
+        UPDATE farms
+        SET code = $1,
+            name = $2,
+            estado = $3,
+            region = $4,
+            sector = $5,
+            coordenadas = $6,
+            maps_link = $7,
+            hectareas = $8,
+            numero_terrenos = $9,
+            tipo_suelos = $10,
+            variedad_banano = $11,
+            edad_plantacion = $12,
+            sistema_riego = $13,
+            fuente_agua = $14,
+            bomba_agua = $15,
+            prop_medidor_elec = $16,
+            empacadora = $17,
+            a_favor_de = $18,
+            produccion_est_mensual = $19,
+            produccion_est_anual = $20,
+            encargado = $21,
+            telefono_encargado = $22,
+            empresa_compradora = $23
+        WHERE id = $24
+        RETURNING *
+        `,
+        [
+          data.code,
+          data.name,
+          data.estado,
+          data.region,
+          data.sector,
+          data.coordenadas,
+          data.maps_link,
+          data.hectareas,
+          data.numero_terrenos,
+          data.tipo_suelos,
+          data.variedad_banano,
+          data.edad_plantacion,
+          data.sistema_riego,
+          data.fuente_agua,
+          data.bomba_agua,
+          data.prop_medidor_elec,
+          data.empacadora,
+          data.a_favor_de,
+          data.produccion_est_mensual,
+          data.produccion_est_anual,
+          data.encargado,
+          data.telefono_encargado,
+          data.empresa_compradora,
+          req.params.id
+        ]
+      );
+
+      res.json({
+        message: "Huerta actualizada correctamente",
+        farm: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 /* =========================
    ARCHIVOS DE HUERTAS
@@ -1017,7 +1215,7 @@ app.put("/farms/:id", authMiddleware, adminOnly, async (req, res) => {
 app.post(
   "/farms/:id/files",
   authMiddleware,
-  adminOnly,
+  allowRoles("admin"),
   farmUpload.fields([
     { name: "pdfs", maxCount: 5 },
     { name: "photos", maxCount: 5 }
@@ -1026,10 +1224,9 @@ app.post(
     try {
       const farmId = req.params.id;
 
-      const existing = await pool.query(
-        "SELECT id FROM farms WHERE id = $1",
-        [farmId]
-      );
+      const existing = await pool.query("SELECT id FROM farms WHERE id = $1", [
+        farmId
+      ]);
 
       if (existing.rows.length === 0) {
         return res.status(404).json({ error: "Huerta no encontrada" });
@@ -1098,304 +1295,461 @@ app.post(
   }
 );
 
-app.get("/farms/:id/files", authMiddleware, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `
-      SELECT *
-      FROM farm_files
-      WHERE farm_id = $1
-      ORDER BY created_at ASC
-      `,
-      [req.params.id]
-    );
+app.get(
+  "/farms/:id/files",
+  authMiddleware,
+  allowRoles("admin", "agricola", "finanzas", "viewer"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `
+        SELECT *
+        FROM farm_files
+        WHERE farm_id = $1
+        ORDER BY created_at ASC
+        `,
+        [req.params.id]
+      );
 
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete("/farm-files/:fileId", authMiddleware, adminOnly, async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM farm_files WHERE id = $1",
-      [req.params.fileId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Archivo no encontrado" });
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    const file = result.rows[0];
-
-    const absolutePath = path.join(
-      __dirname,
-      file.file_url.replace("/uploads", "uploads")
-    );
-
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
-
-    await pool.query("DELETE FROM farm_files WHERE id = $1", [
-      req.params.fileId
-    ]);
-
-    res.json({ message: "Archivo eliminado correctamente" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
+);
+
+app.delete(
+  "/farm-files/:fileId",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        "SELECT * FROM farm_files WHERE id = $1",
+        [req.params.fileId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Archivo no encontrado" });
+      }
+
+      const file = result.rows[0];
+
+      const absolutePath = path.join(
+        __dirname,
+        file.file_url.replace("/uploads", "uploads")
+      );
+
+      if (fs.existsSync(absolutePath)) {
+        fs.unlinkSync(absolutePath);
+      }
+
+      await pool.query("DELETE FROM farm_files WHERE id = $1", [
+        req.params.fileId
+      ]);
+
+      res.json({ message: "Archivo eliminado correctamente" });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 /* =========================
    CORTES DE HUERTAS
 ========================= */
 
-app.post("/farms/:id/cuts", authMiddleware, adminOnly, async (req, res) => {
-  try {
-    const farmId = req.params.id;
+app.post(
+  "/farms/:id/cuts",
+  authMiddleware,
+  allowRoles("admin", "agricola"),
+  async (req, res) => {
+    try {
+      const farmId = req.params.id;
 
-    const existingFarm = await pool.query(
-      "SELECT id FROM farms WHERE id = $1",
-      [farmId]
-    );
+      const existingFarm = await pool.query(
+        "SELECT id FROM farms WHERE id = $1",
+        [farmId]
+      );
 
-    if (existingFarm.rows.length === 0) {
-      return res.status(404).json({ error: "Huerta no encontrada" });
-    }
+      if (existingFarm.rows.length === 0) {
+        return res.status(404).json({ error: "Huerta no encontrada" });
+      }
 
-    const {
-      cut_date,
-      color,
-      boxes_produced,
-      price_per_box,
-      buyer_company,
-      box_design,
-      observation
-    } = req.body;
-
-    if (!cut_date) {
-      return res.status(400).json({ error: "Fecha de corte obligatoria" });
-    }
-
-    const yearMonth = getCutYearMonth(cut_date);
-
-    if (!yearMonth) {
-      return res.status(400).json({ error: "Fecha de corte inválida" });
-    }
-
-    const boxes = Number(boxes_produced || 0);
-    const price = Number(price_per_box || 0);
-    const grossIncome = boxes * price;
-
-    const result = await pool.query(
-      `
-      INSERT INTO farm_cuts (
-        farm_id,
+      const {
         cut_date,
-        cut_year,
-        cut_month,
         color,
         boxes_produced,
         price_per_box,
         buyer_company,
         box_design,
-        gross_income,
         observation
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      RETURNING *
-      `,
-      [
-        farmId,
-        cut_date,
-        yearMonth.year,
-        yearMonth.month,
-        color || null,
-        boxes,
-        price,
-        buyer_company || null,
-        box_design || null,
-        grossIncome,
-        observation || null
-      ]
-    );
+      } = req.body;
 
-    res.status(201).json({
-      message: "Corte creado correctamente",
-      cut: result.rows[0]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+      if (!cut_date) {
+        return res.status(400).json({ error: "Fecha de corte obligatoria" });
+      }
 
-app.get("/farms/:id/cuts", authMiddleware, async (req, res) => {
-  try {
-    const farmId = req.params.id;
-    const { year, month } = req.query;
+      if (!boxes_produced) {
+        return res
+          .status(400)
+          .json({ error: "Cajas producidas es obligatorio" });
+      }
 
-    let query = `
-      SELECT *
-      FROM farm_cuts
-      WHERE farm_id = $1
-    `;
+      const yearMonth = getCutYearMonth(cut_date);
 
-    const values = [farmId];
+      if (!yearMonth) {
+        return res.status(400).json({ error: "Fecha de corte inválida" });
+      }
 
-    if (year) {
-      values.push(Number(year));
-      query += ` AND cut_year = $${values.length}`;
+      const boxes = Number(boxes_produced || 0);
+
+      let price = 0;
+      let grossIncome = 0;
+      let status = "PENDIENTE_FINANZAS";
+
+      if (req.user.role === "admin" && price_per_box) {
+        price = Number(price_per_box || 0);
+        grossIncome = boxes * price;
+        status = "COMPLETO";
+      }
+
+      const result = await pool.query(
+        `
+        INSERT INTO farm_cuts (
+          farm_id,
+          cut_date,
+          cut_year,
+          cut_month,
+          color,
+          boxes_produced,
+          price_per_box,
+          buyer_company,
+          box_design,
+          gross_income,
+          observation,
+          status
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        RETURNING *
+        `,
+        [
+          farmId,
+          cut_date,
+          yearMonth.year,
+          yearMonth.month,
+          color || null,
+          boxes,
+          price,
+          buyer_company || null,
+          box_design || null,
+          grossIncome,
+          observation || null,
+          status
+        ]
+      );
+
+      res.status(201).json({
+        message: "Corte creado correctamente",
+        cut: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
+  }
+);
 
-    if (month) {
-      values.push(Number(month));
-      query += ` AND cut_month = $${values.length}`;
+app.get(
+  "/farms/:id/cuts",
+  authMiddleware,
+  allowRoles("admin", "agricola", "finanzas", "viewer"),
+  async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const { year, month } = req.query;
+
+      let query = `
+        SELECT *
+        FROM farm_cuts
+        WHERE farm_id = $1
+      `;
+
+      const values = [farmId];
+
+      if (year) {
+        values.push(Number(year));
+        query += ` AND cut_year = $${values.length}`;
+      }
+
+      if (month) {
+        values.push(Number(month));
+        query += ` AND cut_month = $${values.length}`;
+      }
+
+      query += ` ORDER BY cut_date DESC, id DESC`;
+
+      const result = await pool.query(query, values);
+
+      if (req.user.role === "agricola") {
+        const sanitized = result.rows.map((cut) => ({
+          id: cut.id,
+          farm_id: cut.farm_id,
+          cut_date: cut.cut_date,
+          cut_year: cut.cut_year,
+          cut_month: cut.cut_month,
+          color: cut.color,
+          boxes_produced: cut.boxes_produced,
+          buyer_company: cut.buyer_company,
+          box_design: cut.box_design,
+          observation: cut.observation,
+          status: cut.status,
+          created_at: cut.created_at,
+          updated_at: cut.updated_at
+        }));
+
+        return res.json(sanitized);
+      }
+
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    query += ` ORDER BY cut_date DESC, id DESC`;
-
-    const result = await pool.query(query, values);
-
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
+);
 
-app.get("/farms/:id/cuts-summary", authMiddleware, async (req, res) => {
-  try {
-    const farmId = req.params.id;
+app.get(
+  "/farms/:id/cuts-summary",
+  authMiddleware,
+  allowRoles("admin", "agricola", "finanzas", "viewer"),
+  async (req, res) => {
+    try {
+      const farmId = req.params.id;
 
-    const result = await pool.query(
-      `
-      SELECT
-        cut_year,
-        cut_month,
-        COUNT(*)::INT AS total_cuts,
-        COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
-        COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income
-      FROM farm_cuts
-      WHERE farm_id = $1
-      GROUP BY cut_year, cut_month
-      ORDER BY cut_year DESC, cut_month DESC
-      `,
-      [farmId]
-    );
+      if (req.user.role === "agricola") {
+        const result = await pool.query(
+          `
+          SELECT
+            cut_year,
+            cut_month,
+            COUNT(*)::INT AS total_cuts,
+            COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes
+          FROM farm_cuts
+          WHERE farm_id = $1
+          GROUP BY cut_year, cut_month
+          ORDER BY cut_year DESC, cut_month DESC
+          `,
+          [farmId]
+        );
 
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+        return res.json(result.rows);
+      }
 
-app.delete("/farm-cuts/:cutId", authMiddleware, adminOnly, async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM farm_cuts WHERE id = $1",
-      [req.params.cutId]
-    );
+      const result = await pool.query(
+        `
+        SELECT
+          cut_year,
+          cut_month,
+          COUNT(*)::INT AS total_cuts,
+          COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
+          COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income
+        FROM farm_cuts
+        WHERE farm_id = $1
+        GROUP BY cut_year, cut_month
+        ORDER BY cut_year DESC, cut_month DESC
+        `,
+        [farmId]
+      );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Corte no encontrado" });
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    await pool.query("DELETE FROM farm_cuts WHERE id = $1", [req.params.cutId]);
-
-    res.json({ message: "Corte eliminado correctamente" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
+);
+
+app.get(
+  "/cuts/pending-finance",
+  authMiddleware,
+  allowRoles("admin", "finanzas"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT
+          fc.*,
+          f.code AS farm_code,
+          f.name AS farm_name
+        FROM farm_cuts fc
+        INNER JOIN farms f ON f.id = fc.farm_id
+        WHERE fc.status = 'PENDIENTE_FINANZAS'
+        ORDER BY fc.cut_date DESC, fc.id DESC
+      `);
+
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.put(
+  "/farm-cuts/:cutId/complete-price",
+  authMiddleware,
+  allowRoles("admin", "finanzas"),
+  async (req, res) => {
+    try {
+      const { price_per_box } = req.body;
+
+      if (!price_per_box) {
+        return res.status(400).json({ error: "Precio por caja obligatorio" });
+      }
+
+      const existing = await pool.query("SELECT * FROM farm_cuts WHERE id = $1", [
+        req.params.cutId
+      ]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Corte no encontrado" });
+      }
+
+      const cut = existing.rows[0];
+
+      const price = Number(price_per_box || 0);
+      const boxes = Number(cut.boxes_produced || 0);
+      const grossIncome = boxes * price;
+
+      const result = await pool.query(
+        `
+        UPDATE farm_cuts
+        SET price_per_box = $1,
+            gross_income = $2,
+            status = 'COMPLETO',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $3
+        RETURNING *
+        `,
+        [price, grossIncome, req.params.cutId]
+      );
+
+      res.json({
+        message: "Precio completado correctamente",
+        cut: result.rows[0]
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.delete(
+  "/farm-cuts/:cutId",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const result = await pool.query("SELECT * FROM farm_cuts WHERE id = $1", [
+        req.params.cutId
+      ]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Corte no encontrado" });
+      }
+
+      await pool.query("DELETE FROM farm_cuts WHERE id = $1", [req.params.cutId]);
+
+      res.json({ message: "Corte eliminado correctamente" });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 /* =========================
    ELIMINAR HUERTA
 ========================= */
 
-app.delete("/farms/:id", authMiddleware, adminOnly, async (req, res) => {
-  try {
-    const existing = await pool.query(
-      "SELECT * FROM farms WHERE id = $1",
-      [req.params.id]
-    );
+app.delete(
+  "/farms/:id",
+  authMiddleware,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const existing = await pool.query("SELECT * FROM farms WHERE id = $1", [
+        req.params.id
+      ]);
 
-    if (existing.rows.length === 0) {
-      return res.status(404).json({ error: "Huerta no encontrada" });
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Huerta no encontrada" });
+      }
+
+      await pool.query("DELETE FROM farms WHERE id = $1", [req.params.id]);
+
+      res.json({
+        message: "Huerta eliminada correctamente"
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    await pool.query("DELETE FROM farms WHERE id = $1", [req.params.id]);
-
-    res.json({
-      message: "Huerta eliminada correctamente"
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
+);
+
 /* =========================
    DASHBOARD GLOBAL
 ========================= */
 
-app.get("/dashboard/global", authMiddleware, async (req, res) => {
-  try {
-    const totals = await pool.query(`
-      SELECT
-        COUNT(*)::INT AS total_cuts,
-        COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
-        COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income,
-        COALESCE(AVG(price_per_box), 0)::NUMERIC(12,2) AS avg_price
-      FROM farm_cuts
-    `);
+app.get(
+  "/dashboard/global",
+  authMiddleware,
+  allowRoles("admin", "finanzas"),
+  async (req, res) => {
+    try {
+      const totals = await pool.query(`
+        SELECT
+          COUNT(*)::INT AS total_cuts,
+          COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
+          COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income,
+          COALESCE(AVG(NULLIF(price_per_box, 0)), 0)::NUMERIC(12,2) AS avg_price,
+          COUNT(*) FILTER (WHERE status = 'PENDIENTE_FINANZAS')::INT AS pending_finance
+        FROM farm_cuts
+      `);
 
-    const byMonth = await pool.query(`
-      SELECT
-        cut_year,
-        cut_month,
-        COUNT(*)::INT AS total_cuts,
-        COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
-        COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income
-      FROM farm_cuts
-      GROUP BY cut_year, cut_month
-      ORDER BY cut_year ASC, cut_month ASC
-    `);
+      const byMonth = await pool.query(`
+        SELECT
+          cut_year,
+          cut_month,
+          COUNT(*)::INT AS total_cuts,
+          COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
+          COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income
+        FROM farm_cuts
+        GROUP BY cut_year, cut_month
+        ORDER BY cut_year ASC, cut_month ASC
+      `);
 
-    const byFarm = await pool.query(`
-      SELECT
-        f.id,
-        f.code,
-        f.name,
-        COUNT(fc.id)::INT AS total_cuts,
-        COALESCE(SUM(fc.boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
-        COALESCE(SUM(fc.gross_income), 0)::NUMERIC(12,2) AS total_income
-      FROM farms f
-      LEFT JOIN farm_cuts fc ON fc.farm_id = f.id
-      GROUP BY f.id, f.code, f.name
-      ORDER BY total_boxes DESC
-    `);
+      const byFarm = await pool.query(`
+        SELECT
+          f.id,
+          f.code,
+          f.name,
+          COUNT(fc.id)::INT AS total_cuts,
+          COALESCE(SUM(fc.boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
+          COALESCE(SUM(fc.gross_income), 0)::NUMERIC(12,2) AS total_income,
+          COUNT(fc.id) FILTER (WHERE fc.status = 'PENDIENTE_FINANZAS')::INT AS pending_finance
+        FROM farms f
+        LEFT JOIN farm_cuts fc ON fc.farm_id = f.id
+        GROUP BY f.id, f.code, f.name
+        ORDER BY total_boxes DESC
+      `);
 
-    const byColor = await pool.query(`
-      SELECT
-        color,
-        COUNT(*)::INT AS total_cuts,
-        COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
-        COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income
-      FROM farm_cuts
-      WHERE color IS NOT NULL
-      GROUP BY color
-      ORDER BY total_boxes DESC
-    `);
-
-    res.json({
-      totals: totals.rows[0],
-      byMonth: byMonth.rows,
-      byFarm: byFarm.rows,
-      byColor: byColor.rows
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      res.json({
+        totals: totals.rows[0],
+        byMonth: byMonth.rows,
+        byFarm: byFarm.rows
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   }
-});
+);
+
 /* =========================
    SERVIDOR
 ========================= */
