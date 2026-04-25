@@ -1839,6 +1839,116 @@ app.delete("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) =
   }
 });
 
+app.post(
+  "/staff/:id/files",
+  authMiddleware,
+  allowRoles("admin"),
+  staffUpload.fields([
+    { name: "ine", maxCount: 1 },
+    { name: "pdfs", maxCount: 5 }
+  ]),
+  async (req, res) => {
+    try {
+      const staffId = req.params.id;
+
+      const existing = await pool.query("SELECT id FROM staff WHERE id = $1", [staffId]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Empleado no encontrado" });
+      }
+
+      const ineFiles = req.files?.ine || [];
+      const pdfs = req.files?.pdfs || [];
+      const inserted = [];
+
+      for (const file of ineFiles) {
+        const fileUrl = `/uploads/staff/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO staff_files (staff_id, file_type, file_name, file_url)
+          VALUES ($1, 'INE', $2, $3)
+          RETURNING *
+          `,
+          [staffId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      for (const file of pdfs) {
+        const fileUrl = `/uploads/staff/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO staff_files (staff_id, file_type, file_name, file_url)
+          VALUES ($1, 'PDF', $2, $3)
+          RETURNING *
+          `,
+          [staffId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      res.json({
+        message: "Archivos subidos correctamente",
+        files: inserted
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.get("/staff/:id/files", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM staff_files
+      WHERE staff_id = $1
+      ORDER BY created_at DESC
+      `,
+      [req.params.id]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/staff-files/:fileId", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM staff_files WHERE id = $1",
+      [req.params.fileId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Archivo no encontrado" });
+    }
+
+    const file = result.rows[0];
+
+    const absolutePath = path.join(
+      __dirname,
+      file.file_url.replace("/uploads", "uploads")
+    );
+
+    if (fs.existsSync(absolutePath)) {
+      fs.unlinkSync(absolutePath);
+    }
+
+    await pool.query("DELETE FROM staff_files WHERE id = $1", [req.params.fileId]);
+
+    res.json({ message: "Archivo eliminado correctamente" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* =========================
    DASHBOARD GLOBAL
 ========================= */
