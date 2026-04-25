@@ -948,20 +948,7 @@ app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
 
 
 // Obtener empleados
-app.get("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT *
-      FROM staff
-      ORDER BY id ASC
-    `);
 
-    res.json(result.rows);
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.post("/farms", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
