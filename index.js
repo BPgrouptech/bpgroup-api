@@ -1749,7 +1749,38 @@ app.get(
     }
   }
 );
+app.get("/migrate-cuts-flow", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'PENDIENTE_FINANZAS';
+    `);
 
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ADD COLUMN IF NOT EXISTS created_by INTEGER;
+    `);
+
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ADD COLUMN IF NOT EXISTS approved_by INTEGER;
+    `);
+
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
+    `);
+
+    await pool.query(`
+      ALTER TABLE farm_cuts
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+    `);
+
+    res.send("Migración de cortes completada");
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 /* =========================
    SERVIDOR
 ========================= */
