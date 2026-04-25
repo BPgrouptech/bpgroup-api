@@ -91,6 +91,32 @@ const farmStorage = multer.diskStorage({
 const farmUpload = multer({ storage: farmStorage });
 
 /* =========================
+   MULTER PERSONAL
+========================= */
+
+const staffStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const staffUploadsDir = path.join(__dirname, "uploads", "staff");
+
+    if (!fs.existsSync(staffUploadsDir)) {
+      fs.mkdirSync(staffUploadsDir, { recursive: true });
+    }
+
+    cb(null, staffUploadsDir);
+  },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    const cleanName = file.originalname
+      .replace(ext, "")
+      .replace(/[^a-zA-Z0-9-_]/g, "_");
+
+    cb(null, `staff_${req.params.id}_${Date.now()}_${cleanName}${ext}`);
+  }
+});
+
+const staffUpload = multer({ storage: staffStorage });
+
+/* =========================
    MIDDLEWARES
 ========================= */
 
@@ -182,7 +208,19 @@ function getCutYearMonth(cutDate) {
     month: date.getMonth() + 1
   };
 }
+function generateEmployeeCode(fullName, curp) {
+  if (!fullName || !curp) return null;
 
+  const namePart = fullName
+    .split(" ")
+    .slice(0, 2)
+    .map(n => n.substring(0, 3).toUpperCase())
+    .join("");
+
+  const curpPart = curp.substring(0, 4).toUpperCase();
+
+  return `${namePart}-${curpPart}-${Date.now().toString().slice(-4)}`;
+}
 /* =========================
    RUTAS BASE
 ========================= */
@@ -308,6 +346,17 @@ app.get("/create-tables", async (req, res) => {
         phone VARCHAR(30),
         farm_id INT REFERENCES farms(id) ON DELETE SET NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+    CREATE TABLE IF NOT EXISTS staff_files (
+      id SERIAL PRIMARY KEY,
+      staff_id INT REFERENCES staff(id) ON DELETE CASCADE,
+      file_type VARCHAR(30) NOT NULL,
+      file_name TEXT NOT NULL,
+      file_url TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
@@ -826,6 +875,60 @@ app.delete("/assets/:id", authMiddleware, allowRoles("admin"), async (req, res) 
 /* =========================
    HUERTAS
 ========================= */
+
+/* =========================
+   STAFF (PERSONAL)
+========================= */
+
+// Crear empleado
+app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const { full_name, position, phone, farm_id } = req.body;
+
+    if (!full_name) {
+      return res.status(400).json({ error: "Nombre obligatorio" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO staff (full_name, position, phone, farm_id)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [
+        full_name,
+        position || null,
+        phone || null,
+        farm_id || null
+      ]
+    );
+
+    res.status(201).json({
+      message: "Empleado creado correctamente",
+      staff: result.rows[0]
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// Obtener empleados
+app.get("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT *
+      FROM staff
+      ORDER BY id ASC
+    `);
+
+    res.json(result.rows);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.post("/farms", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
@@ -1456,6 +1559,118 @@ app.delete("/farm-cuts/:cutId", authMiddleware, allowRoles("admin"), async (req,
   }
 });
 
+app.post(
+  "/staff/:id/files",
+  authMiddleware,
+  allowRoles("admin"),
+  staffUpload.fields([
+    { name: "ine", maxCount: 1 },
+    { name: "pdfs", maxCount: 5 }
+  ]),
+  async (req, res) => {
+    try {
+      const staffId = req.params.id;
+
+      const existing = await pool.query("SELECT id FROM staff WHERE id = $1", [
+        staffId
+      ]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Empleado no encontrado" });
+      }
+
+      const ineFiles = req.files?.ine || [];
+      const pdfs = req.files?.pdfs || [];
+      const inserted = [];
+
+      for (const file of ineFiles) {
+        const fileUrl = `/uploads/staff/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO staff_files (staff_id, file_type, file_name, file_url)
+          VALUES ($1, 'INE', $2, $3)
+          RETURNING *
+          `,
+          [staffId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      for (const file of pdfs) {
+        const fileUrl = `/uploads/staff/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO staff_files (staff_id, file_type, file_name, file_url)
+          VALUES ($1, 'PDF', $2, $3)
+          RETURNING *
+          `,
+          [staffId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      res.json({
+        message: "Archivos de empleado subidos correctamente",
+        files: inserted
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.get("/staff/:id/files", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM staff_files
+      WHERE staff_id = $1
+      ORDER BY created_at ASC
+      `,
+      [req.params.id]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/staff-files/:fileId", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM staff_files WHERE id = $1", [
+      req.params.fileId
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Archivo no encontrado" });
+    }
+
+    const file = result.rows[0];
+    const absolutePath = path.join(
+      __dirname,
+      file.file_url.replace("/uploads", "uploads")
+    );
+
+    if (fs.existsSync(absolutePath)) {
+      fs.unlinkSync(absolutePath);
+    }
+
+    await pool.query("DELETE FROM staff_files WHERE id = $1", [
+      req.params.fileId
+    ]);
+
+    res.json({ message: "Archivo eliminado correctamente" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* =========================
    ELIMINAR HUERTA
 ========================= */
@@ -1475,7 +1690,138 @@ app.delete("/farms/:id", authMiddleware, allowRoles("admin"), async (req, res) =
     res.status(500).json({ error: err.message });
   }
 });
+/* =========================
+   PERSONAL
+========================= */
+app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const {
+      full_name,
+      curp,
+      birth_date,
+      address,
+      phone,
+      emergency_contact_1_name,
+      emergency_contact_1_phone,
+      emergency_contact_2_name,
+      emergency_contact_2_phone,
+      area,
+      company_name
+    } = req.body;
 
+    if (!full_name || !curp) {
+      return res.status(400).json({ error: "Nombre y CURP obligatorios" });
+    }
+
+    const employee_code = generateEmployeeCode(full_name, curp);
+
+    const result = await pool.query(
+      `
+      INSERT INTO staff (
+        full_name, curp, birth_date, address, phone,
+        emergency_contact_1_name, emergency_contact_1_phone,
+        emergency_contact_2_name, emergency_contact_2_phone,
+        area, company_name, employee_code
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      RETURNING *
+      `,
+      [
+        full_name,
+        curp,
+        birth_date || null,
+        address || null,
+        phone || null,
+        emergency_contact_1_name || null,
+        emergency_contact_1_phone || null,
+        emergency_contact_2_name || null,
+        emergency_contact_2_phone || null,
+        area || null,
+        company_name || null,
+        employee_code
+      ]
+    );
+
+    res.json({ message: "Empleado creado", employee: result.rows[0] });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const { area } = req.query;
+
+    let query = "SELECT * FROM staff";
+    let values = [];
+
+    if (area) {
+      query += " WHERE area = $1";
+      values.push(area);
+    }
+
+    query += " ORDER BY id DESC";
+
+    const result = await pool.query(query, values);
+
+    res.json(result.rows);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const existing = await pool.query("SELECT * FROM staff WHERE id = $1", [req.params.id]);
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Empleado no encontrado" });
+    }
+
+    const current = existing.rows[0];
+
+    const data = {
+      full_name: req.body.full_name ?? current.full_name,
+      phone: req.body.phone ?? current.phone,
+      address: req.body.address ?? current.address,
+      area: req.body.area ?? current.area,
+      company_name: req.body.company_name ?? current.company_name
+    };
+
+    const result = await pool.query(
+      `
+      UPDATE staff
+      SET full_name=$1, phone=$2, address=$3, area=$4, company_name=$5
+      WHERE id=$6
+      RETURNING *
+      `,
+      [
+        data.full_name,
+        data.phone,
+        data.address,
+        data.area,
+        data.company_name,
+        req.params.id
+      ]
+    );
+
+    res.json(result.rows[0]);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    await pool.query("DELETE FROM staff WHERE id = $1", [req.params.id]);
+    res.json({ message: "Empleado eliminado" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 /* =========================
    DASHBOARD GLOBAL
 ========================= */
