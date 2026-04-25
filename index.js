@@ -881,17 +881,10 @@ app.delete("/assets/:id", authMiddleware, allowRoles("admin"), async (req, res) 
 ========================= */
 
 // Crear empleado
+
 app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
-    const { full_name, position, phone, farm_id } = req.body;
-
-    if (!full_name) {
-      return res.status(400).json({ error: "Nombre obligatorio" });
-    }
-
-    const result = await pool.query(
-      `
-      INSERT INTO staff (
+    const {
       full_name,
       curp,
       area,
@@ -903,11 +896,31 @@ app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
       emergency_contact_1_phone,
       emergency_contact_2_name,
       emergency_contact_2_phone
-)
-      VALUES ($1, $2, $3, $4)
+    } = req.body;
+
+    if (!full_name || !area) {
+      return res.status(400).json({ error: "Nombre y área son obligatorios" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO staff (
+        full_name,
+        curp,
+        area,
+        company,
+        birth_date,
+        address,
+        phone,
+        emergency_contact_1_name,
+        emergency_contact_1_phone,
+        emergency_contact_2_name,
+        emergency_contact_2_phone
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       RETURNING *
       `,
-      [ 
+      [
         full_name,
         curp || null,
         area,
@@ -919,7 +932,6 @@ app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
         emergency_contact_1_phone || null,
         emergency_contact_2_name || null,
         emergency_contact_2_phone || null
-
       ]
     );
 
@@ -932,6 +944,7 @@ app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 // Obtener empleados
@@ -1713,61 +1726,6 @@ app.delete("/farms/:id", authMiddleware, allowRoles("admin"), async (req, res) =
 /* =========================
    PERSONAL
 ========================= */
-app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
-  try {
-    const {
-      full_name,
-      curp,
-      birth_date,
-      address,
-      phone,
-      emergency_contact_1_name,
-      emergency_contact_1_phone,
-      emergency_contact_2_name,
-      emergency_contact_2_phone,
-      area,
-      company_name
-    } = req.body;
-
-    if (!full_name || !curp) {
-      return res.status(400).json({ error: "Nombre y CURP obligatorios" });
-    }
-
-    const employee_code = generateEmployeeCode(full_name, curp);
-
-    const result = await pool.query(
-      `
-      INSERT INTO staff (
-        full_name, curp, birth_date, address, phone,
-        emergency_contact_1_name, emergency_contact_1_phone,
-        emergency_contact_2_name, emergency_contact_2_phone,
-        area, company_name, employee_code
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-      RETURNING *
-      `,
-      [
-        full_name,
-        curp,
-        birth_date || null,
-        address || null,
-        phone || null,
-        emergency_contact_1_name || null,
-        emergency_contact_1_phone || null,
-        emergency_contact_2_name || null,
-        emergency_contact_2_phone || null,
-        area || null,
-        company_name || null,
-        employee_code
-      ]
-    );
-
-    res.json({ message: "Empleado creado", employee: result.rows[0] });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.get("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
@@ -1847,67 +1805,6 @@ app.delete("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) =
    STAFF (PERSONAL)
 ========================= */
 
-app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
-  try {
-    const {
-      full_name,
-      curp,
-      area,
-      company,
-      birth_date,
-      address,
-      phone,
-      emergency_contact_1_name,
-      emergency_contact_1_phone,
-      emergency_contact_2_name,
-      emergency_contact_2_phone
-    } = req.body;
-
-    if (!full_name || !area) {
-      return res.status(400).json({ error: "Nombre y área son obligatorios" });
-    }
-
-    const result = await pool.query(
-      `
-      INSERT INTO staff (
-        full_name,
-        curp,
-        area,
-        company,
-        birth_date,
-        address,
-        phone,
-        emergency_contact_1_name,
-        emergency_contact_1_phone,
-        emergency_contact_2_name,
-        emergency_contact_2_phone
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      RETURNING *
-      `,
-      [
-        full_name,
-        curp || null,
-        area,
-        company || null,
-        birth_date || null,
-        address || null,
-        phone || null,
-        emergency_contact_1_name || null,
-        emergency_contact_1_phone || null,
-        emergency_contact_2_name || null,
-        emergency_contact_2_phone || null
-      ]
-    );
-
-    res.status(201).json({
-      message: "Empleado creado correctamente",
-      employee: result.rows[0]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 /* =========================
    DASHBOARD GLOBAL
