@@ -1822,6 +1822,73 @@ app.delete("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) =
     res.status(500).json({ error: err.message });
   }
 });
+
+/* =========================
+   STAFF (PERSONAL)
+========================= */
+
+app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const {
+      full_name,
+      curp,
+      area,
+      company,
+      birth_date,
+      address,
+      phone,
+      emergency_contact_1_name,
+      emergency_contact_1_phone,
+      emergency_contact_2_name,
+      emergency_contact_2_phone
+    } = req.body;
+
+    if (!full_name || !area) {
+      return res.status(400).json({ error: "Nombre y área son obligatorios" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO staff (
+        full_name,
+        curp,
+        area,
+        company,
+        birth_date,
+        address,
+        phone,
+        emergency_contact_1_name,
+        emergency_contact_1_phone,
+        emergency_contact_2_name,
+        emergency_contact_2_phone
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      RETURNING *
+      `,
+      [
+        full_name,
+        curp || null,
+        area,
+        company || null,
+        birth_date || null,
+        address || null,
+        phone || null,
+        emergency_contact_1_name || null,
+        emergency_contact_1_phone || null,
+        emergency_contact_2_name || null,
+        emergency_contact_2_phone || null
+      ]
+    );
+
+    res.status(201).json({
+      message: "Empleado creado correctamente",
+      employee: result.rows[0]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* =========================
    DASHBOARD GLOBAL
 ========================= */
