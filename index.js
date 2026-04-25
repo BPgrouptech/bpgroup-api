@@ -1752,7 +1752,10 @@ app.get("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
 
 app.put("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
-    const existing = await pool.query("SELECT * FROM staff WHERE id = $1", [req.params.id]);
+    const existing = await pool.query(
+      "SELECT * FROM staff WHERE id = $1",
+      [req.params.id]
+    );
 
     if (existing.rows.length === 0) {
       return res.status(404).json({ error: "Empleado no encontrado" });
@@ -1762,31 +1765,56 @@ app.put("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
 
     const data = {
       full_name: req.body.full_name ?? current.full_name,
-      phone: req.body.phone ?? current.phone,
-      address: req.body.address ?? current.address,
+      curp: req.body.curp ?? current.curp,
       area: req.body.area ?? current.area,
-      company_name: req.body.company_name ?? current.company_name
+      company: req.body.company ?? current.company,
+      birth_date: req.body.birth_date ?? current.birth_date,
+      address: req.body.address ?? current.address,
+      phone: req.body.phone ?? current.phone,
+      emergency_contact_1_name: req.body.emergency_contact_1_name ?? current.emergency_contact_1_name,
+      emergency_contact_1_phone: req.body.emergency_contact_1_phone ?? current.emergency_contact_1_phone,
+      emergency_contact_2_name: req.body.emergency_contact_2_name ?? current.emergency_contact_2_name,
+      emergency_contact_2_phone: req.body.emergency_contact_2_phone ?? current.emergency_contact_2_phone
     };
 
     const result = await pool.query(
       `
       UPDATE staff
-      SET full_name=$1, phone=$2, address=$3, area=$4, company_name=$5
-      WHERE id=$6
+      SET
+        full_name = $1,
+        curp = $2,
+        area = $3,
+        company = $4,
+        birth_date = $5,
+        address = $6,
+        phone = $7,
+        emergency_contact_1_name = $8,
+        emergency_contact_1_phone = $9,
+        emergency_contact_2_name = $10,
+        emergency_contact_2_phone = $11
+      WHERE id = $12
       RETURNING *
       `,
       [
         data.full_name,
-        data.phone,
-        data.address,
+        data.curp,
         data.area,
-        data.company_name,
+        data.company,
+        data.birth_date,
+        data.address,
+        data.phone,
+        data.emergency_contact_1_name,
+        data.emergency_contact_1_phone,
+        data.emergency_contact_2_name,
+        data.emergency_contact_2_phone,
         req.params.id
       ]
     );
 
-    res.json(result.rows[0]);
-
+    res.json({
+      message: "Empleado actualizado correctamente",
+      staff: result.rows[0]
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1794,17 +1822,22 @@ app.put("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
 
 app.delete("/staff/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
+    const existing = await pool.query(
+      "SELECT id FROM staff WHERE id = $1",
+      [req.params.id]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Empleado no encontrado" });
+    }
+
     await pool.query("DELETE FROM staff WHERE id = $1", [req.params.id]);
-    res.json({ message: "Empleado eliminado" });
+
+    res.json({ message: "Empleado eliminado correctamente" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
-/* =========================
-   STAFF (PERSONAL)
-========================= */
-
 
 /* =========================
    DASHBOARD GLOBAL
