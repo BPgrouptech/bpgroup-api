@@ -891,15 +891,35 @@ app.post("/staff", authMiddleware, allowRoles("admin"), async (req, res) => {
 
     const result = await pool.query(
       `
-      INSERT INTO staff (full_name, position, phone, farm_id)
+      INSERT INTO staff (
+      full_name,
+      curp,
+      area,
+      company,
+      birth_date,
+      address,
+      phone,
+      emergency_contact_1_name,
+      emergency_contact_1_phone,
+      emergency_contact_2_name,
+      emergency_contact_2_phone
+)
       VALUES ($1, $2, $3, $4)
       RETURNING *
       `,
-      [
+      [ 
         full_name,
-        position || null,
+        curp || null,
+        area,
+        company || null,
+        birth_date || null,
+        address || null,
         phone || null,
-        farm_id || null
+        emergency_contact_1_name || null,
+        emergency_contact_1_phone || null,
+        emergency_contact_2_name || null,
+        emergency_contact_2_phone || null
+
       ]
     );
 
