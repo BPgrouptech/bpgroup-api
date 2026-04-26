@@ -64,6 +64,28 @@ const assetStorage = multer.diskStorage({
 
 const upload = multer({ storage: assetStorage });
 
+const assetFileStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const assetUploadsDir = path.join(__dirname, "uploads", "assets");
+
+    if (!fs.existsSync(assetUploadsDir)) {
+      fs.mkdirSync(assetUploadsDir, { recursive: true });
+    }
+
+    cb(null, assetUploadsDir);
+  },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    const cleanName = file.originalname
+      .replace(ext, "")
+      .replace(/[^a-zA-Z0-9-_]/g, "_");
+
+    cb(null, `asset_file_${req.params.id}_${Date.now()}_${cleanName}${ext}`);
+  }
+});
+
+const assetFileUpload = multer({ storage: assetFileStorage });
+
 /* =========================
    MULTER HUERTAS
 ========================= */
@@ -271,6 +293,17 @@ app.get("/create-tables", async (req, res) => {
         image_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS asset_files (
+      id SERIAL PRIMARY KEY,
+      asset_id INT REFERENCES assets(id) ON DELETE CASCADE,
+      file_type VARCHAR(30) NOT NULL,
+      file_name TEXT NOT NULL,
+      file_url TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
@@ -872,6 +905,114 @@ app.delete("/assets/:id", authMiddleware, allowRoles("admin"), async (req, res) 
   }
 });
 
+app.post(
+  "/assets/:id/files",
+  authMiddleware,
+  allowRoles("admin", "inventario"),
+  assetFileUpload.fields([
+    { name: "photos" },
+    { name: "pdfs" }
+  ]),
+  async (req, res) => {
+    try {
+      const assetId = req.params.id;
+
+      const existing = await pool.query("SELECT id FROM assets WHERE id = $1", [assetId]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Vehículo no encontrado" });
+      }
+
+      const photos = req.files?.photos || [];
+      const pdfs = req.files?.pdfs || [];
+      const inserted = [];
+
+      for (const file of photos) {
+        const fileUrl = `/uploads/assets/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO asset_files (asset_id, file_type, file_name, file_url)
+          VALUES ($1, 'PHOTO', $2, $3)
+          RETURNING *
+          `,
+          [assetId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      for (const file of pdfs) {
+        const fileUrl = `/uploads/assets/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO asset_files (asset_id, file_type, file_name, file_url)
+          VALUES ($1, 'PDF', $2, $3)
+          RETURNING *
+          `,
+          [assetId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      res.json({
+        message: "Archivos de vehículo subidos correctamente",
+        files: inserted
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.get("/assets/:id/files", authMiddleware, allowRoles("admin", "inventario", "viewer"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM asset_files
+      WHERE asset_id = $1
+      ORDER BY created_at DESC
+      `,
+      [req.params.id]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/asset-files/:fileId", authMiddleware, allowRoles("admin", "inventario"), async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM asset_files WHERE id = $1", [
+      req.params.fileId
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Archivo no encontrado" });
+    }
+
+    const file = result.rows[0];
+
+    const absolutePath = path.join(
+      __dirname,
+      file.file_url.replace("/uploads", "uploads")
+    );
+
+    if (fs.existsSync(absolutePath)) {
+      fs.unlinkSync(absolutePath);
+    }
+
+    await pool.query("DELETE FROM asset_files WHERE id = $1", [req.params.fileId]);
+
+    res.json({ message: "Archivo eliminado correctamente" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 /* =========================
    HUERTAS
 ========================= */
