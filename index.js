@@ -1197,24 +1197,6 @@ app.post(
       const pdfs = req.files?.pdfs || [];
       const photos = req.files?.photos || [];
 
-      const totalPdfs = await pool.query(
-        "SELECT COUNT(*) FROM farm_files WHERE farm_id = $1 AND file_type = 'PDF'",
-        [farmId]
-      );
-
-      const totalPhotos = await pool.query(
-        "SELECT COUNT(*) FROM farm_files WHERE farm_id = $1 AND file_type = 'PHOTO'",
-        [farmId]
-      );
-
-      if (Number(totalPdfs.rows[0].count) + pdfs.length > 5) {
-        return res.status(400).json({ error: "Máximo 5 PDFs por huerta" });
-      }
-
-      if (Number(totalPhotos.rows[0].count) + photos.length > 5) {
-        return res.status(400).json({ error: "Máximo 5 fotos por huerta" });
-      }
-
       const inserted = [];
 
       for (const file of pdfs) {
@@ -1584,8 +1566,8 @@ app.post(
   authMiddleware,
   allowRoles("admin"),
   staffUpload.fields([
-    { name: "ine", maxCount: 1 },
-    { name: "pdfs", maxCount: 5 }
+    { name: "ine" },
+    { name: "pdfs" }
   ]),
   async (req, res) => {
     try {
@@ -1831,8 +1813,8 @@ app.post(
   authMiddleware,
   allowRoles("admin"),
   staffUpload.fields([
-    { name: "ine", maxCount: 1 },
-    { name: "pdfs", maxCount: 5 }
+    { name: "ine" },
+    { name: "pdfs" }
   ]),
   async (req, res) => {
     try {
