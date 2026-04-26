@@ -2058,7 +2058,57 @@ app.delete("/staff-files/:fileId", authMiddleware, allowRoles("admin"), async (r
     res.status(500).json({ error: err.message });
   }
 });
+app.get("/dashboard/summary", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
+  try {
+    const totals = await pool.query(`
+      SELECT
+        (SELECT COUNT(*)::INT FROM farms) AS total_farms,
+        (SELECT COUNT(*)::INT FROM assets) AS total_assets,
+        (SELECT COUNT(*)::INT FROM staff) AS total_staff,
+        (SELECT COUNT(*)::INT FROM farm_cuts) AS total_cuts,
+        (SELECT COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) FROM farm_cuts) AS total_boxes,
+        (SELECT COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) FROM farm_cuts) AS total_income
+    `);
 
+    const staffByArea = await pool.query(`
+      SELECT area, COUNT(*)::INT AS total
+      FROM staff
+      GROUP BY area
+      ORDER BY area ASC
+    `);
+
+    const assetsByFunction = await pool.query(`
+      SELECT function AS area, COUNT(*)::INT AS total
+      FROM assets
+      GROUP BY function
+      ORDER BY function ASC
+    `);
+
+    const latestStaff = await pool.query(`
+      SELECT id, full_name, curp, area, company, created_at
+      FROM staff
+      ORDER BY created_at DESC
+      LIMIT 5
+    `);
+
+    const latestAssets = await pool.query(`
+      SELECT id, code, brand, model, function, created_at
+      FROM assets
+      ORDER BY created_at DESC
+      LIMIT 5
+    `);
+
+    res.json({
+      totals: totals.rows[0],
+      staffByArea: staffByArea.rows,
+      assetsByFunction: assetsByFunction.rows,
+      latestStaff: latestStaff.rows,
+      latestAssets: latestAssets.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 /* =========================
    DASHBOARD GLOBAL
 ========================= */
