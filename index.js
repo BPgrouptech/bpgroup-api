@@ -372,6 +372,39 @@ app.get("/create-tables", async (req, res) => {
     `);
 
     await pool.query(`
+  CREATE TABLE IF NOT EXISTS farm_monthly_expenses (
+    id SERIAL PRIMARY KEY,
+    farm_id INT REFERENCES farms(id) ON DELETE CASCADE,
+    expense_year INT NOT NULL,
+    expense_month INT NOT NULL,
+    chemicals NUMERIC(12,2) DEFAULT 0,
+    pesticides NUMERIC(12,2) DEFAULT 0,
+    fertilizers NUMERIC(12,2) DEFAULT 0,
+    irrigation NUMERIC(12,2) DEFAULT 0,
+    fuel NUMERIC(12,2) DEFAULT 0,
+    maintenance NUMERIC(12,2) DEFAULT 0,
+    other_expenses NUMERIC(12,2) DEFAULT 0,
+    observation TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(farm_id, expense_year, expense_month)
+  );
+`);
+
+  await pool.query(`
+  CREATE TABLE IF NOT EXISTS monthly_payroll (
+    id SERIAL PRIMARY KEY,
+    payroll_year INT NOT NULL,
+    payroll_month INT NOT NULL,
+    total_payroll NUMERIC(12,2) DEFAULT 0,
+    observation TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(payroll_year, payroll_month)
+  );
+`);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS staff (
         id SERIAL PRIMARY KEY,
         full_name VARCHAR(120) NOT NULL,
