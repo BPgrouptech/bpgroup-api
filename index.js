@@ -372,22 +372,19 @@ app.get("/create-tables", async (req, res) => {
     `);
 
     await pool.query(`
-  CREATE TABLE IF NOT EXISTS farm_monthly_expenses (
+  CREATE TABLE IF NOT EXISTS global_monthly_expenses (
     id SERIAL PRIMARY KEY,
-    farm_id INT REFERENCES farms(id) ON DELETE CASCADE,
     expense_year INT NOT NULL,
     expense_month INT NOT NULL,
-    chemicals NUMERIC(12,2) DEFAULT 0,
-    pesticides NUMERIC(12,2) DEFAULT 0,
-    fertilizers NUMERIC(12,2) DEFAULT 0,
-    irrigation NUMERIC(12,2) DEFAULT 0,
+    chemicals_fertilizers NUMERIC(12,2) DEFAULT 0,
+    electricity NUMERIC(12,2) DEFAULT 0,
     fuel NUMERIC(12,2) DEFAULT 0,
     maintenance NUMERIC(12,2) DEFAULT 0,
     other_expenses NUMERIC(12,2) DEFAULT 0,
     observation TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(farm_id, expense_year, expense_month)
+    UNIQUE(expense_year, expense_month)
   );
 `);
 
@@ -1457,17 +1454,13 @@ app.delete("/farm-files/:fileId", authMiddleware, allowRoles("admin"), async (re
 ========================= */
 
 // Guardar o actualizar gastos mensuales de una huerta
-app.post("/farms/:id/monthly-expenses", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
+app.post("/global-monthly-expenses", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
   try {
-    const farmId = req.params.id;
-
     const {
       expense_year,
       expense_month,
-      chemicals,
-      pesticides,
-      fertilizers,
-      irrigation,
+      chemicals_fertilizers,
+      electricity,
       fuel,
       maintenance,
       other_expenses,
@@ -1478,35 +1471,24 @@ app.post("/farms/:id/monthly-expenses", authMiddleware, allowRoles("admin", "fin
       return res.status(400).json({ error: "expense_year y expense_month son obligatorios" });
     }
 
-    const existingFarm = await pool.query("SELECT id FROM farms WHERE id = $1", [farmId]);
-
-    if (existingFarm.rows.length === 0) {
-      return res.status(404).json({ error: "Huerta no encontrada" });
-    }
-
     const result = await pool.query(
       `
-      INSERT INTO farm_monthly_expenses (
-        farm_id,
+      INSERT INTO global_monthly_expenses (
         expense_year,
         expense_month,
-        chemicals,
-        pesticides,
-        fertilizers,
-        irrigation,
+        chemicals_fertilizers,
+        electricity,
         fuel,
         maintenance,
         other_expenses,
         observation,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CURRENT_TIMESTAMP)
-      ON CONFLICT (farm_id, expense_year, expense_month)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CURRENT_TIMESTAMP)
+      ON CONFLICT (expense_year, expense_month)
       DO UPDATE SET
-        chemicals = EXCLUDED.chemicals,
-        pesticides = EXCLUDED.pesticides,
-        fertilizers = EXCLUDED.fertilizers,
-        irrigation = EXCLUDED.irrigation,
+        chemicals_fertilizers = EXCLUDED.chemicals_fertilizers,
+        electricity = EXCLUDED.electricity,
         fuel = EXCLUDED.fuel,
         maintenance = EXCLUDED.maintenance,
         other_expenses = EXCLUDED.other_expenses,
@@ -1515,13 +1497,10 @@ app.post("/farms/:id/monthly-expenses", authMiddleware, allowRoles("admin", "fin
       RETURNING *
       `,
       [
-        farmId,
         Number(expense_year),
         Number(expense_month),
-        Number(chemicals || 0),
-        Number(pesticides || 0),
-        Number(fertilizers || 0),
-        Number(irrigation || 0),
+        Number(chemicals_fertilizers || 0),
+        Number(electricity || 0),
         Number(fuel || 0),
         Number(maintenance || 0),
         Number(other_expenses || 0),
@@ -1530,14 +1509,13 @@ app.post("/farms/:id/monthly-expenses", authMiddleware, allowRoles("admin", "fin
     );
 
     res.json({
-      message: "Gastos mensuales guardados correctamente",
+      message: "Gastos globales mensuales guardados correctamente",
       expenses: result.rows[0]
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 // Guardar o actualizar nómina total mensual
 app.post("/monthly-payroll", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
   try {
@@ -1598,118 +1576,93 @@ app.get("/farms-finance/monthly-summary", authMiddleware, allowRoles("admin", "f
 
     const result = await pool.query(
       `
-      WITH production AS (
-        SELECT
-          farm_id,
-          cut_year,
-          cut_month,
-          COALESCE(SUM(boxes_produced), 0) AS boxes,
-          COALESCE(SUM(gross_income), 0) AS income
-        FROM farm_cuts
-        WHERE cut_year = $1
-          AND cut_month = $2
-          AND status = 'COMPLETO'
-        GROUP BY farm_id, cut_year, cut_month
-      ),
-      total_production AS (
-        SELECT COALESCE(SUM(boxes), 0) AS total_boxes
-        FROM production
-      )
       SELECT
-        f.id AS farm_id,
-        f.code AS farm_code,
-        f.name AS farm_name,
+        $1::INT AS year,
+        $2::INT AS month,
 
-        COALESCE(p.boxes, 0)::NUMERIC(12,2) AS boxes,
-        COALESCE(p.income, 0)::NUMERIC(12,2) AS income,
+        COUNT(fc.id)::INT AS total_cuts,
+        COALESCE(SUM(fc.boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
+        COALESCE(SUM(fc.gross_income), 0)::NUMERIC(12,2) AS total_income,
 
-        COALESCE(e.chemicals, 0)::NUMERIC(12,2) AS chemicals,
-        COALESCE(e.pesticides, 0)::NUMERIC(12,2) AS pesticides,
-        COALESCE(e.fertilizers, 0)::NUMERIC(12,2) AS fertilizers,
-        COALESCE(e.irrigation, 0)::NUMERIC(12,2) AS irrigation,
+        COALESCE(e.chemicals_fertilizers, 0)::NUMERIC(12,2) AS chemicals_fertilizers,
+        COALESCE(e.electricity, 0)::NUMERIC(12,2) AS electricity,
         COALESCE(e.fuel, 0)::NUMERIC(12,2) AS fuel,
         COALESCE(e.maintenance, 0)::NUMERIC(12,2) AS maintenance,
         COALESCE(e.other_expenses, 0)::NUMERIC(12,2) AS other_expenses,
 
+        COALESCE(mp.total_payroll, 0)::NUMERIC(12,2) AS total_payroll,
+
         (
-          COALESCE(e.chemicals, 0)
-          + COALESCE(e.pesticides, 0)
-          + COALESCE(e.fertilizers, 0)
-          + COALESCE(e.irrigation, 0)
+          COALESCE(e.chemicals_fertilizers, 0)
+          + COALESCE(e.electricity, 0)
           + COALESCE(e.fuel, 0)
           + COALESCE(e.maintenance, 0)
           + COALESCE(e.other_expenses, 0)
         )::NUMERIC(12,2) AS direct_expenses,
 
-        COALESCE(mp.total_payroll, 0)::NUMERIC(12,2) AS total_monthly_payroll,
-
-        CASE
-          WHEN tp.total_boxes > 0 THEN
-            ((COALESCE(p.boxes, 0) / tp.total_boxes) * COALESCE(mp.total_payroll, 0))
-          ELSE 0
-        END::NUMERIC(12,2) AS assigned_payroll,
-
         (
-          (
-            COALESCE(e.chemicals, 0)
-            + COALESCE(e.pesticides, 0)
-            + COALESCE(e.fertilizers, 0)
-            + COALESCE(e.irrigation, 0)
-            + COALESCE(e.fuel, 0)
-            + COALESCE(e.maintenance, 0)
-            + COALESCE(e.other_expenses, 0)
-          )
-          +
-          CASE
-            WHEN tp.total_boxes > 0 THEN
-              ((COALESCE(p.boxes, 0) / tp.total_boxes) * COALESCE(mp.total_payroll, 0))
-            ELSE 0
-          END
+          COALESCE(e.chemicals_fertilizers, 0)
+          + COALESCE(e.electricity, 0)
+          + COALESCE(e.fuel, 0)
+          + COALESCE(e.maintenance, 0)
+          + COALESCE(e.other_expenses, 0)
+          + COALESCE(mp.total_payroll, 0)
         )::NUMERIC(12,2) AS total_expenses,
 
         (
-          COALESCE(p.income, 0)
+          COALESCE(SUM(fc.gross_income), 0)
           -
           (
-            (
-              COALESCE(e.chemicals, 0)
-              + COALESCE(e.pesticides, 0)
-              + COALESCE(e.fertilizers, 0)
-              + COALESCE(e.irrigation, 0)
-              + COALESCE(e.fuel, 0)
-              + COALESCE(e.maintenance, 0)
-              + COALESCE(e.other_expenses, 0)
-            )
-            +
-            CASE
-              WHEN tp.total_boxes > 0 THEN
-                ((COALESCE(p.boxes, 0) / tp.total_boxes) * COALESCE(mp.total_payroll, 0))
-              ELSE 0
-            END
+            COALESCE(e.chemicals_fertilizers, 0)
+            + COALESCE(e.electricity, 0)
+            + COALESCE(e.fuel, 0)
+            + COALESCE(e.maintenance, 0)
+            + COALESCE(e.other_expenses, 0)
+            + COALESCE(mp.total_payroll, 0)
           )
         )::NUMERIC(12,2) AS profit
 
-      FROM farms f
-      LEFT JOIN production p ON p.farm_id = f.id
-      LEFT JOIN farm_monthly_expenses e
-        ON e.farm_id = f.id
-        AND e.expense_year = $1
+      FROM farm_cuts fc
+      LEFT JOIN global_monthly_expenses e
+        ON e.expense_year = $1
         AND e.expense_month = $2
       LEFT JOIN monthly_payroll mp
         ON mp.payroll_year = $1
         AND mp.payroll_month = $2
-      CROSS JOIN total_production tp
-      ORDER BY profit DESC, f.code ASC NULLS LAST, f.name ASC
+      WHERE fc.cut_year = $1
+        AND fc.cut_month = $2
+        AND fc.status = 'COMPLETO'
+      GROUP BY
+        e.chemicals_fertilizers,
+        e.electricity,
+        e.fuel,
+        e.maintenance,
+        e.other_expenses,
+        mp.total_payroll
       `,
       [year, month]
     );
 
-    res.json(result.rows);
+    res.json(result.rows[0] || {
+      year,
+      month,
+      total_cuts: 0,
+      total_boxes: 0,
+      total_income: 0,
+      chemicals_fertilizers: 0,
+      electricity: 0,
+      fuel: 0,
+      maintenance: 0,
+      other_expenses: 0,
+      total_payroll: 0,
+      direct_expenses: 0,
+      total_expenses: 0,
+      profit: 0
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 /* =========================
    CORTES DE HUERTAS
 ========================= */
