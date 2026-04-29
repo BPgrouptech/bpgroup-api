@@ -2360,27 +2360,83 @@ app.get("/dashboard/summary", authMiddleware, allowRoles("admin", "finanzas"), a
 app.get("/dashboard/global", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
   try {
     const totals = await pool.query(`
-      SELECT
-        COUNT(*)::INT AS total_cuts,
-        COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
-        COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income,
-        COALESCE(AVG(NULLIF(price_per_box, 0)), 0)::NUMERIC(12,2) AS avg_price,
-        COUNT(*) FILTER (WHERE status = 'PENDIENTE_FINANZAS')::INT AS pending_finance
-      FROM farm_cuts
-    `);
+  WITH monthly_income AS (
+    SELECT
+      cut_year,
+      cut_month,
+      COALESCE(SUM(gross_income), 0) AS total_income
+    FROM farm_cuts
+    WHERE status = 'COMPLETO'
+    GROUP BY cut_year, cut_month
+  ),
+  monthly_profit AS (
+    SELECT
+      mi.cut_year,
+      mi.cut_month,
+      (
+        mi.total_income
+        - COALESCE(gme.chemicals_fertilizers, 0)
+        - COALESCE(gme.electricity, 0)
+        - COALESCE(gme.fuel, 0)
+        - COALESCE(gme.maintenance, 0)
+        - COALESCE(gme.other_expenses, 0)
+        - COALESCE(mp.total_payroll, 0)
+      ) AS profit
+    FROM monthly_income mi
+    LEFT JOIN global_monthly_expenses gme
+      ON gme.expense_year = mi.cut_year
+      AND gme.expense_month = mi.cut_month
+    LEFT JOIN monthly_payroll mp
+      ON mp.payroll_year = mi.cut_year
+      AND mp.payroll_month = mi.cut_month
+  )
+  SELECT
+    (SELECT COUNT(*)::INT FROM farm_cuts) AS total_cuts,
+    (SELECT COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) FROM farm_cuts) AS total_boxes,
+    (SELECT COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) FROM farm_cuts) AS total_income,
+    (SELECT COALESCE(SUM(profit), 0)::NUMERIC(12,2) FROM monthly_profit) AS total_profit,
+    (SELECT COALESCE(AVG(NULLIF(price_per_box, 0)), 0)::NUMERIC(12,2) FROM farm_cuts) AS avg_price,
+    (SELECT COUNT(*) FILTER (WHERE status = 'PENDIENTE_FINANZAS')::INT FROM farm_cuts) AS pending_finance
+`);
 
     const byMonth = await pool.query(`
-      SELECT
-        cut_year,
-        cut_month,
-        COUNT(*)::INT AS total_cuts,
-        COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
-        COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income,
-        COUNT(*) FILTER (WHERE status = 'PENDIENTE_FINANZAS')::INT AS pending_finance
-      FROM farm_cuts
-      GROUP BY cut_year, cut_month
-      ORDER BY cut_year ASC, cut_month ASC
-    `);
+  WITH monthly_income AS (
+    SELECT
+      cut_year,
+      cut_month,
+      COUNT(*)::INT AS total_cuts,
+      COALESCE(SUM(boxes_produced), 0)::NUMERIC(12,2) AS total_boxes,
+      COALESCE(SUM(gross_income), 0)::NUMERIC(12,2) AS total_income,
+      COUNT(*) FILTER (WHERE status = 'PENDIENTE_FINANZAS')::INT AS pending_finance
+    FROM farm_cuts
+    GROUP BY cut_year, cut_month
+  )
+  SELECT
+    mi.*,
+    COALESCE(gme.chemicals_fertilizers, 0)::NUMERIC(12,2) AS chemicals_fertilizers,
+    COALESCE(gme.electricity, 0)::NUMERIC(12,2) AS electricity,
+    COALESCE(gme.fuel, 0)::NUMERIC(12,2) AS fuel,
+    COALESCE(gme.maintenance, 0)::NUMERIC(12,2) AS maintenance,
+    COALESCE(gme.other_expenses, 0)::NUMERIC(12,2) AS other_expenses,
+    COALESCE(mp.total_payroll, 0)::NUMERIC(12,2) AS total_payroll,
+    (
+      mi.total_income
+      - COALESCE(gme.chemicals_fertilizers, 0)
+      - COALESCE(gme.electricity, 0)
+      - COALESCE(gme.fuel, 0)
+      - COALESCE(gme.maintenance, 0)
+      - COALESCE(gme.other_expenses, 0)
+      - COALESCE(mp.total_payroll, 0)
+    )::NUMERIC(12,2) AS total_profit
+  FROM monthly_income mi
+  LEFT JOIN global_monthly_expenses gme
+    ON gme.expense_year = mi.cut_year
+    AND gme.expense_month = mi.cut_month
+  LEFT JOIN monthly_payroll mp
+    ON mp.payroll_year = mi.cut_year
+    AND mp.payroll_month = mi.cut_month
+  ORDER BY mi.cut_year ASC, mi.cut_month ASC
+`);
 
     const byFarm = await pool.query(`
       SELECT
