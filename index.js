@@ -2782,7 +2782,12 @@ app.post("/airplanes/:id/transactions", authMiddleware, allowRoles("admin", "fin
       VALUES ($1,$2,$3,'EGRESO',$4,CURRENT_TIMESTAMP)
       RETURNING *
       `,
-      [airplaneId, transaction_date, description, Number(amount || 0)]
+      [
+        airplaneId,
+        transaction_date,
+        description,
+        Number(amount || 0)
+      ]
     );
 
     res.status(201).json({
@@ -2840,6 +2845,10 @@ app.put("/airplane-transactions/:transactionId", authMiddleware, allowRoles("adm
   try {
     const { transaction_date, description, amount } = req.body;
 
+    if (!transaction_date || !description || amount === undefined) {
+      return res.status(400).json({ error: "Fecha, descripción y valor son obligatorios" });
+    }
+
     const result = await pool.query(
       `
       UPDATE airplane_transactions
@@ -2851,7 +2860,12 @@ app.put("/airplane-transactions/:transactionId", authMiddleware, allowRoles("adm
       WHERE id = $4
       RETURNING *
       `,
-      [transaction_date, description, Number(amount || 0), req.params.transactionId]
+      [
+        transaction_date,
+        description,
+        Number(amount || 0),
+        req.params.transactionId
+      ]
     );
 
     if (result.rows.length === 0) {
@@ -2862,15 +2876,6 @@ app.put("/airplane-transactions/:transactionId", authMiddleware, allowRoles("adm
       message: "Gasto de avión actualizado",
       transaction: result.rows[0]
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete("/airplane-transactions/:transactionId", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
-  try {
-    await pool.query("DELETE FROM airplane_transactions WHERE id = $1", [req.params.transactionId]);
-    res.json({ message: "Registro eliminado" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
