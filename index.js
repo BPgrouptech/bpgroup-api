@@ -2442,6 +2442,497 @@ app.get("/dashboard/summary", authMiddleware, allowRoles("admin", "finanzas"), a
     res.status(500).json({ error: err.message });
   }
 });
+
+/* =========================
+   AVIONES
+========================= */
+
+app.post("/airplanes", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const { registration, brand, model, year, hours, observation } = req.body;
+
+    if (!registration) {
+      return res.status(400).json({ error: "La matrícula es obligatoria" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO airplanes (registration, brand, model, year, hours, observation, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP)
+      RETURNING *
+      `,
+      [
+        registration.trim().toUpperCase(),
+        brand || null,
+        model || null,
+        year || null,
+        Number(hours || 0),
+        observation || null
+      ]
+    );
+
+    res.status(201).json({ message: "Avión creado correctamente", airplane: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/airplanes", authMiddleware, allowRoles("admin", "finanzas", "viewer"), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT *
+      FROM airplanes
+      ORDER BY registration ASC
+    `);
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/airplanes/:id", authMiddleware, allowRoles("admin", "finanzas", "viewer"), async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM airplanes WHERE id = $1", [req.params.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Avión no encontrado" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/airplanes/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const existing = await pool.query("SELECT * FROM airplanes WHERE id = $1", [req.params.id]);
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Avión no encontrado" });
+    }
+
+    const current = existing.rows[0];
+
+    const data = {
+      registration: req.body.registration ?? current.registration,
+      brand: req.body.brand ?? current.brand,
+      model: req.body.model ?? current.model,
+      year: req.body.year ?? current.year,
+      hours: req.body.hours ?? current.hours,
+      observation: req.body.observation ?? current.observation
+    };
+
+    const result = await pool.query(
+      `
+      UPDATE airplanes
+      SET registration = $1,
+          brand = $2,
+          model = $3,
+          year = $4,
+          hours = $5,
+          observation = $6,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $7
+      RETURNING *
+      `,
+      [
+        String(data.registration || "").trim().toUpperCase(),
+        data.brand || null,
+        data.model || null,
+        data.year || null,
+        Number(data.hours || 0),
+        data.observation || null,
+        req.params.id
+      ]
+    );
+
+    res.json({ message: "Avión actualizado correctamente", airplane: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/airplanes/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const existing = await pool.query("SELECT * FROM airplanes WHERE id = $1", [req.params.id]);
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Avión no encontrado" });
+    }
+
+    await pool.query("DELETE FROM airplanes WHERE id = $1", [req.params.id]);
+
+    res.json({ message: "Avión eliminado correctamente" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================
+   ARCHIVOS DE AVIONES
+========================= */
+
+app.post(
+  "/airplanes/:id/files",
+  authMiddleware,
+  allowRoles("admin"),
+  airplaneUpload.fields([
+    { name: "photos" },
+    { name: "pdfs" }
+  ]),
+  async (req, res) => {
+    try {
+      const airplaneId = req.params.id;
+
+      const existing = await pool.query("SELECT id FROM airplanes WHERE id = $1", [airplaneId]);
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Avión no encontrado" });
+      }
+
+      const photos = req.files?.photos || [];
+      const pdfs = req.files?.pdfs || [];
+      const inserted = [];
+
+      for (const file of photos) {
+        const fileUrl = `/uploads/airplanes/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO airplane_files (airplane_id, file_type, file_name, file_url)
+          VALUES ($1, 'PHOTO', $2, $3)
+          RETURNING *
+          `,
+          [airplaneId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      for (const file of pdfs) {
+        const fileUrl = `/uploads/airplanes/${file.filename}`;
+
+        const result = await pool.query(
+          `
+          INSERT INTO airplane_files (airplane_id, file_type, file_name, file_url)
+          VALUES ($1, 'PDF', $2, $3)
+          RETURNING *
+          `,
+          [airplaneId, file.originalname, fileUrl]
+        );
+
+        inserted.push(result.rows[0]);
+      }
+
+      res.json({ message: "Archivos de avión subidos correctamente", files: inserted });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+app.get("/airplanes/:id/files", authMiddleware, allowRoles("admin", "finanzas", "viewer"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM airplane_files
+      WHERE airplane_id = $1
+      ORDER BY created_at DESC
+      `,
+      [req.params.id]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/airplane-files/:fileId", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM airplane_files WHERE id = $1", [req.params.fileId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Archivo no encontrado" });
+    }
+
+    const file = result.rows[0];
+
+    const absolutePath = path.join(__dirname, file.file_url.replace("/uploads", "uploads"));
+
+    if (fs.existsSync(absolutePath)) {
+      fs.unlinkSync(absolutePath);
+    }
+
+    await pool.query("DELETE FROM airplane_files WHERE id = $1", [req.params.fileId]);
+
+    res.json({ message: "Archivo eliminado correctamente" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================
+   MANTENIMIENTOS AVIONES
+========================= */
+
+app.post("/airplanes/:id/maintenance", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const airplaneId = req.params.id;
+    const { maintenance_date, description } = req.body;
+
+    if (!maintenance_date || !description) {
+      return res.status(400).json({ error: "Fecha y descripción son obligatorias" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO airplane_maintenance (airplane_id, maintenance_date, description, updated_at)
+      VALUES ($1,$2,$3,CURRENT_TIMESTAMP)
+      RETURNING *
+      `,
+      [airplaneId, maintenance_date, description]
+    );
+
+    res.status(201).json({ message: "Mantenimiento agregado", maintenance: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/airplanes/:id/maintenance", authMiddleware, allowRoles("admin", "finanzas", "viewer"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM airplane_maintenance
+      WHERE airplane_id = $1
+      ORDER BY maintenance_date DESC, id DESC
+      `,
+      [req.params.id]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/airplane-maintenance/:maintenanceId", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    const { maintenance_date, description } = req.body;
+
+    const result = await pool.query(
+      `
+      UPDATE airplane_maintenance
+      SET maintenance_date = $1,
+          description = $2,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $3
+      RETURNING *
+      `,
+      [maintenance_date, description, req.params.maintenanceId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Mantenimiento no encontrado" });
+    }
+
+    res.json({ message: "Mantenimiento actualizado", maintenance: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/airplane-maintenance/:maintenanceId", authMiddleware, allowRoles("admin"), async (req, res) => {
+  try {
+    await pool.query("DELETE FROM airplane_maintenance WHERE id = $1", [req.params.maintenanceId]);
+    res.json({ message: "Mantenimiento eliminado" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================
+   REGISTRO DE GASTOS / CUENTA AVIÓN
+========================= */
+
+app.post("/airplanes/:id/transactions", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
+  try {
+    const airplaneId = req.params.id;
+    const { transaction_date, description, type, amount } = req.body;
+
+    if (!transaction_date || !description || !type || amount === undefined) {
+      return res.status(400).json({ error: "Fecha, descripción, tipo y valor son obligatorios" });
+    }
+
+    if (!["INGRESO", "EGRESO"].includes(type)) {
+      return res.status(400).json({ error: "Tipo inválido" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO airplane_transactions (airplane_id, transaction_date, description, type, amount, updated_at)
+      VALUES ($1,$2,$3,$4,$5,CURRENT_TIMESTAMP)
+      RETURNING *
+      `,
+      [airplaneId, transaction_date, description, type, Number(amount || 0)]
+    );
+
+    res.status(201).json({ message: "Registro agregado", transaction: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/airplanes/:id/transactions", authMiddleware, allowRoles("admin", "finanzas", "viewer"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM airplane_transactions
+      WHERE airplane_id = $1
+      ORDER BY transaction_date DESC, id DESC
+      `,
+      [req.params.id]
+    );
+
+    const balanceResult = await pool.query(
+      `
+      SELECT COALESCE(SUM(
+        CASE
+          WHEN type = 'INGRESO' THEN amount
+          WHEN type = 'EGRESO' THEN -amount
+          ELSE 0
+        END
+      ), 0)::NUMERIC(12,2) AS balance
+      FROM airplane_transactions
+      WHERE airplane_id = $1
+      `,
+      [req.params.id]
+    );
+
+    res.json({
+      balance: balanceResult.rows[0]?.balance || 0,
+      transactions: result.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/airplane-transactions/:transactionId", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
+  try {
+    const { transaction_date, description, type, amount } = req.body;
+
+    if (!["INGRESO", "EGRESO"].includes(type)) {
+      return res.status(400).json({ error: "Tipo inválido" });
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE airplane_transactions
+      SET transaction_date = $1,
+          description = $2,
+          type = $3,
+          amount = $4,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $5
+      RETURNING *
+      `,
+      [transaction_date, description, type, Number(amount || 0), req.params.transactionId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Registro no encontrado" });
+    }
+
+    res.json({ message: "Registro actualizado", transaction: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/airplane-transactions/:transactionId", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
+  try {
+    await pool.query("DELETE FROM airplane_transactions WHERE id = $1", [req.params.transactionId]);
+    res.json({ message: "Registro eliminado" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================
+   AVIONES GENERAL
+========================= */
+
+app.post("/airplanes-general", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
+  try {
+    const { expense_date, description, type, amount } = req.body;
+
+    if (!expense_date || !description || !type || amount === undefined) {
+      return res.status(400).json({ error: "Fecha, descripción, tipo y valor son obligatorios" });
+    }
+
+    if (!["INGRESO", "EGRESO"].includes(type)) {
+      return res.status(400).json({ error: "Tipo inválido" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO airplane_general_expenses (expense_date, description, type, amount, updated_at)
+      VALUES ($1,$2,$3,$4,CURRENT_TIMESTAMP)
+      RETURNING *
+      `,
+      [expense_date, description, type, Number(amount || 0)]
+    );
+
+    res.status(201).json({ message: "Registro general agregado", general: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/airplanes-general", authMiddleware, allowRoles("admin", "finanzas", "viewer"), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT *
+      FROM airplane_general_expenses
+      ORDER BY expense_date DESC, id DESC
+    `);
+
+    const balanceResult = await pool.query(`
+      SELECT COALESCE(SUM(
+        CASE
+          WHEN type = 'INGRESO' THEN amount
+          WHEN type = 'EGRESO' THEN -amount
+          ELSE 0
+        END
+      ), 0)::NUMERIC(12,2) AS balance
+      FROM airplane_general_expenses
+    `);
+
+    res.json({
+      balance: balanceResult.rows[0]?.balance || 0,
+      records: result.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/airplanes-general/:id", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
+  try {
+    await pool.query("DELETE FROM airplane_general_expenses WHERE id = $1", [req.params.id]);
+    res.json({ message: "Registro general eliminado" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* =========================
    DASHBOARD GLOBAL
 ========================= */
