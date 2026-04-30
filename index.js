@@ -113,6 +113,33 @@ const farmStorage = multer.diskStorage({
 const farmUpload = multer({ storage: farmStorage });
 
 /* =========================
+   MULTER AVIONES
+========================= */
+
+const airplaneStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const airplaneUploadsDir = path.join(__dirname, "uploads", "airplanes");
+
+    if (!fs.existsSync(airplaneUploadsDir)) {
+      fs.mkdirSync(airplaneUploadsDir, { recursive: true });
+    }
+
+    cb(null, airplaneUploadsDir);
+  },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    const cleanName = file.originalname
+      .replace(ext, "")
+      .replace(/[^a-zA-Z0-9-_]/g, "_");
+
+    cb(null, `airplane_${req.params.id}_${Date.now()}_${cleanName}${ext}`);
+  }
+});
+
+const airplaneUpload = multer({ storage: airplaneStorage });
+
+
+/* =========================
    MULTER PERSONAL
 ========================= */
 
@@ -306,6 +333,68 @@ app.get("/create-tables", async (req, res) => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    await pool.query(`
+  CREATE TABLE IF NOT EXISTS airplanes (
+    id SERIAL PRIMARY KEY,
+    registration VARCHAR(50) UNIQUE NOT NULL,
+    brand VARCHAR(100),
+    model VARCHAR(100),
+    year INT,
+    hours NUMERIC(12,2) DEFAULT 0,
+    observation TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS airplane_files (
+    id SERIAL PRIMARY KEY,
+    airplane_id INT REFERENCES airplanes(id) ON DELETE CASCADE,
+    file_type VARCHAR(30) NOT NULL,
+    file_name TEXT NOT NULL,
+    file_url TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS airplane_maintenance (
+    id SERIAL PRIMARY KEY,
+    airplane_id INT REFERENCES airplanes(id) ON DELETE CASCADE,
+    maintenance_date DATE NOT NULL,
+    description TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS airplane_transactions (
+    id SERIAL PRIMARY KEY,
+    airplane_id INT REFERENCES airplanes(id) ON DELETE CASCADE,
+    transaction_date DATE NOT NULL,
+    description TEXT NOT NULL,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('INGRESO', 'EGRESO')),
+    amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS airplane_general_expenses (
+    id SERIAL PRIMARY KEY,
+    expense_date DATE NOT NULL,
+    description TEXT NOT NULL,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('INGRESO', 'EGRESO')),
+    amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS farms (
