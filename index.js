@@ -2763,26 +2763,32 @@ app.delete("/airplane-maintenance/:maintenanceId", authMiddleware, allowRoles("a
 app.post("/airplanes/:id/transactions", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
   try {
     const airplaneId = req.params.id;
-    const { transaction_date, description, type, amount } = req.body;
+    const { transaction_date, description, amount } = req.body;
 
-    if (!transaction_date || !description || !type || amount === undefined) {
-      return res.status(400).json({ error: "Fecha, descripción, tipo y valor son obligatorios" });
-    }
-
-    if (!["INGRESO", "EGRESO"].includes(type)) {
-      return res.status(400).json({ error: "Tipo inválido" });
+    if (!transaction_date || !description || amount === undefined) {
+      return res.status(400).json({ error: "Fecha, descripción y valor son obligatorios" });
     }
 
     const result = await pool.query(
       `
-      INSERT INTO airplane_transactions (airplane_id, transaction_date, description, type, amount, updated_at)
-      VALUES ($1,$2,$3,$4,$5,CURRENT_TIMESTAMP)
+      INSERT INTO airplane_transactions (
+        airplane_id,
+        transaction_date,
+        description,
+        type,
+        amount,
+        updated_at
+      )
+      VALUES ($1,$2,$3,'EGRESO',$4,CURRENT_TIMESTAMP)
       RETURNING *
       `,
-      [airplaneId, transaction_date, description, type, Number(amount || 0)]
+      [airplaneId, transaction_date, description, Number(amount || 0)]
     );
 
-    res.status(201).json({ message: "Registro agregado", transaction: result.rows[0] });
+    res.status(201).json({
+      message: "Gasto de avión agregado",
+      transaction: result.rows[0]
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2800,20 +2806,26 @@ app.get("/airplanes/:id/transactions", authMiddleware, allowRoles("admin", "fina
       [req.params.id]
     );
 
-    const balanceResult = await pool.query(
-      `
-      SELECT COALESCE(SUM(
-        CASE
-          WHEN type = 'INGRESO' THEN amount
-          WHEN type = 'EGRESO' THEN -amount
-          ELSE 0
-        END
-      ), 0)::NUMERIC(12,2) AS balance
-      FROM airplane_transactions
-      WHERE airplane_id = $1
-      `,
-      [req.params.id]
-    );
+    const balanceResult = await pool.query(`
+      SELECT
+        (
+          COALESCE((
+            SELECT SUM(
+              CASE
+                WHEN type = 'INGRESO' THEN amount
+                WHEN type = 'EGRESO' THEN -amount
+                ELSE 0
+              END
+            )
+            FROM airplane_general_expenses
+          ), 0)
+          -
+          COALESCE((
+            SELECT SUM(amount)
+            FROM airplane_transactions
+          ), 0)
+        )::NUMERIC(12,2) AS balance
+    `);
 
     res.json({
       balance: balanceResult.rows[0]?.balance || 0,
@@ -2826,31 +2838,30 @@ app.get("/airplanes/:id/transactions", authMiddleware, allowRoles("admin", "fina
 
 app.put("/airplane-transactions/:transactionId", authMiddleware, allowRoles("admin", "finanzas"), async (req, res) => {
   try {
-    const { transaction_date, description, type, amount } = req.body;
-
-    if (!["INGRESO", "EGRESO"].includes(type)) {
-      return res.status(400).json({ error: "Tipo inválido" });
-    }
+    const { transaction_date, description, amount } = req.body;
 
     const result = await pool.query(
       `
       UPDATE airplane_transactions
       SET transaction_date = $1,
           description = $2,
-          type = $3,
-          amount = $4,
+          type = 'EGRESO',
+          amount = $3,
           updated_at = CURRENT_TIMESTAMP
-      WHERE id = $5
+      WHERE id = $4
       RETURNING *
       `,
-      [transaction_date, description, type, Number(amount || 0), req.params.transactionId]
+      [transaction_date, description, Number(amount || 0), req.params.transactionId]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Registro no encontrado" });
     }
 
-    res.json({ message: "Registro actualizado", transaction: result.rows[0] });
+    res.json({
+      message: "Gasto de avión actualizado",
+      transaction: result.rows[0]
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2905,14 +2916,24 @@ app.get("/airplanes-general", authMiddleware, allowRoles("admin", "finanzas", "v
     `);
 
     const balanceResult = await pool.query(`
-      SELECT COALESCE(SUM(
-        CASE
-          WHEN type = 'INGRESO' THEN amount
-          WHEN type = 'EGRESO' THEN -amount
-          ELSE 0
-        END
-      ), 0)::NUMERIC(12,2) AS balance
-      FROM airplane_general_expenses
+      SELECT
+        (
+          COALESCE((
+            SELECT SUM(
+              CASE
+                WHEN type = 'INGRESO' THEN amount
+                WHEN type = 'EGRESO' THEN -amount
+                ELSE 0
+              END
+            )
+            FROM airplane_general_expenses
+          ), 0)
+          -
+          COALESCE((
+            SELECT SUM(amount)
+            FROM airplane_transactions
+          ), 0)
+        )::NUMERIC(12,2) AS balance
     `);
 
     res.json({
