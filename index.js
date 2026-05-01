@@ -229,9 +229,9 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
-app.get("/files/*key", authMiddleware, async (req, res) => {
+app.get(/^\/files\/(.+)$/, authMiddleware, async (req, res) => {
   try {
-    const key = req.params.key;
+    const key = req.params[0];
 
     const result = await s3.send(
       new GetObjectCommand({
@@ -245,7 +245,8 @@ app.get("/files/*key", authMiddleware, async (req, res) => {
     res.setHeader("Content-Type", result.ContentType || "application/octet-stream");
     res.send(buffer);
   } catch (err) {
-    res.status(404).send("Archivo no encontrado");
+    console.error("ERROR LEYENDO ARCHIVO R2:", err);
+    res.status(404).json({ error: "Archivo no encontrado" });
   }
 });
 
