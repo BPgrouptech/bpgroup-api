@@ -9,6 +9,66 @@ const path = require("path");
 const fs = require("fs");
 const pool = require("./db");
 
+const {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand
+} = require("@aws-sdk/client-s3");
+
+const s3 = new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY
+  }
+});
+
+function cleanFileName(name = "file") {
+  return String(name)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+async function uploadToR2(file, folder = "general") {
+  const safeName = cleanFileName(file.originalname);
+  const fileKey = `${folder}/${Date.now()}_${safeName}`;
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: fileKey,
+      Body: file.buffer,
+      ContentType: file.mimetype
+    })
+  );
+
+  return fileKey;
+}
+
+async function deleteFromR2(fileKey) {
+  if (!fileKey || fileKey.startsWith("/uploads/")) return;
+
+  await s3.send(
+    new DeleteObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: fileKey
+    })
+  );
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks);
+}
+
 const app = express();
 
 const allowedOrigins = [
@@ -40,130 +100,12 @@ app.use(
 app.options(/.*/, cors());
 app.use(express.json());
 
-const uploadsDir = path.join(__dirname, "uploads");
+const upload = multer({ storage: multer.memoryStorage() });
 
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-app.use("/uploads", express.static(uploadsDir));
-
-/* =========================
-   MULTER VEHÍCULOS
-========================= */
-
-const assetStorage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase() || ".jpg";
-    cb(null, `asset_${req.params.id}_${Date.now()}${ext}`);
-  }
-});
-
-const upload = multer({ storage: assetStorage });
-
-const assetFileStorage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const assetUploadsDir = path.join(__dirname, "uploads", "assets");
-
-    if (!fs.existsSync(assetUploadsDir)) {
-      fs.mkdirSync(assetUploadsDir, { recursive: true });
-    }
-
-    cb(null, assetUploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const cleanName = file.originalname
-      .replace(ext, "")
-      .replace(/[^a-zA-Z0-9-_]/g, "_");
-
-    cb(null, `asset_file_${req.params.id}_${Date.now()}_${cleanName}${ext}`);
-  }
-});
-
-const assetFileUpload = multer({ storage: assetFileStorage });
-
-/* =========================
-   MULTER HUERTAS
-========================= */
-
-const farmStorage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const farmUploadsDir = path.join(__dirname, "uploads", "farms");
-
-    if (!fs.existsSync(farmUploadsDir)) {
-      fs.mkdirSync(farmUploadsDir, { recursive: true });
-    }
-
-    cb(null, farmUploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const cleanName = file.originalname
-      .replace(ext, "")
-      .replace(/[^a-zA-Z0-9-_]/g, "_");
-
-    cb(null, `farm_${req.params.id}_${Date.now()}_${cleanName}${ext}`);
-  }
-});
-
-const farmUpload = multer({ storage: farmStorage });
-
-/* =========================
-   MULTER AVIONES
-========================= */
-
-const airplaneStorage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const airplaneUploadsDir = path.join(__dirname, "uploads", "airplanes");
-
-    if (!fs.existsSync(airplaneUploadsDir)) {
-      fs.mkdirSync(airplaneUploadsDir, { recursive: true });
-    }
-
-    cb(null, airplaneUploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const cleanName = file.originalname
-      .replace(ext, "")
-      .replace(/[^a-zA-Z0-9-_]/g, "_");
-
-    cb(null, `airplane_${req.params.id}_${Date.now()}_${cleanName}${ext}`);
-  }
-});
-
-const airplaneUpload = multer({ storage: airplaneStorage });
-
-
-/* =========================
-   MULTER PERSONAL
-========================= */
-
-const staffStorage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const staffUploadsDir = path.join(__dirname, "uploads", "staff");
-
-    if (!fs.existsSync(staffUploadsDir)) {
-      fs.mkdirSync(staffUploadsDir, { recursive: true });
-    }
-
-    cb(null, staffUploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const cleanName = file.originalname
-      .replace(ext, "")
-      .replace(/[^a-zA-Z0-9-_]/g, "_");
-
-    cb(null, `staff_${req.params.id}_${Date.now()}_${cleanName}${ext}`);
-  }
-});
-
-const staffUpload = multer({ storage: staffStorage });
+const assetFileUpload = upload;
+const farmUpload = upload;
+const airplaneUpload = upload;
+const staffUpload = upload;
 
 /* =========================
    MIDDLEWARES
@@ -284,6 +226,26 @@ app.get("/test-db", async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/files/*key", authMiddleware, async (req, res) => {
+  try {
+    const key = req.params.key;
+
+    const result = await s3.send(
+      new GetObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: key
+      })
+    );
+
+    const buffer = await streamToBuffer(result.Body);
+
+    res.setHeader("Content-Type", result.ContentType || "application/octet-stream");
+    res.send(buffer);
+  } catch (err) {
+    res.status(404).send("Archivo no encontrado");
   }
 });
 
@@ -1047,7 +1009,7 @@ app.post(
       const inserted = [];
 
       for (const file of photos) {
-        const fileUrl = `/uploads/assets/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `assets/${assetId}`);
 
         const result = await pool.query(
           `
@@ -1062,7 +1024,7 @@ app.post(
       }
 
       for (const file of pdfs) {
-        const fileUrl = `/uploads/assets/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `assets/${assetId}`);
 
         const result = await pool.query(
           `
@@ -1116,14 +1078,7 @@ app.delete("/asset-files/:fileId", authMiddleware, allowRoles("admin", "inventar
 
     const file = result.rows[0];
 
-    const absolutePath = path.join(
-      __dirname,
-      file.file_url.replace("/uploads", "uploads")
-    );
-
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
+    await deleteFromR2(file.file_url);
 
     await pool.query("DELETE FROM asset_files WHERE id = $1", [req.params.fileId]);
 
@@ -1460,7 +1415,7 @@ app.post(
       const inserted = [];
 
       for (const file of pdfs) {
-        const fileUrl = `/uploads/farms/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `farms/${farmId}`);
 
         const result = await pool.query(
           `
@@ -1475,7 +1430,7 @@ app.post(
       }
 
       for (const file of photos) {
-        const fileUrl = `/uploads/farms/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `farms/${farmId}`);
 
         const result = await pool.query(
           `
@@ -1524,11 +1479,7 @@ app.delete("/farm-files/:fileId", authMiddleware, allowRoles("admin"), async (re
 
     const file = result.rows[0];
 
-    const absolutePath = path.join(__dirname, file.file_url.replace("/uploads", "uploads"));
-
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
+    await deleteFromR2(file.file_url);
 
     await pool.query("DELETE FROM farm_files WHERE id = $1", [req.params.fileId]);
 
@@ -2060,7 +2011,7 @@ app.post(
       const inserted = [];
 
       for (const file of ineFiles) {
-        const fileUrl = `/uploads/staff/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `staff/${staffId}`);
 
         const result = await pool.query(
           `
@@ -2075,7 +2026,7 @@ app.post(
       }
 
       for (const file of pdfs) {
-        const fileUrl = `/uploads/staff/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `staff/${staffId}`);
 
         const result = await pool.query(
           `
@@ -2128,14 +2079,7 @@ app.delete("/staff-files/:fileId", authMiddleware, allowRoles("admin"), async (r
     }
 
     const file = result.rows[0];
-    const absolutePath = path.join(
-      __dirname,
-      file.file_url.replace("/uploads", "uploads")
-    );
-
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
+    await deleteFromR2(file.file_url);
 
     await pool.query("DELETE FROM staff_files WHERE id = $1", [
       req.params.fileId
@@ -2374,15 +2318,7 @@ app.delete("/staff-files/:fileId", authMiddleware, allowRoles("admin"), async (r
     }
 
     const file = result.rows[0];
-
-    const absolutePath = path.join(
-      __dirname,
-      file.file_url.replace("/uploads", "uploads")
-    );
-
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
+    await deleteFromR2(file.file_url);
 
     await pool.query("DELETE FROM staff_files WHERE id = $1", [req.params.fileId]);
 
@@ -2597,7 +2533,7 @@ app.post(
       const inserted = [];
 
       for (const file of photos) {
-        const fileUrl = `/uploads/airplanes/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `airplanes/${airplaneId}`);
 
         const result = await pool.query(
           `
@@ -2612,7 +2548,7 @@ app.post(
       }
 
       for (const file of pdfs) {
-        const fileUrl = `/uploads/airplanes/${file.filename}`;
+        const fileUrl = await uploadToR2(file, `airplanes/${airplaneId}`);
 
         const result = await pool.query(
           `
@@ -2661,11 +2597,7 @@ app.delete("/airplane-files/:fileId", authMiddleware, allowRoles("admin"), async
 
     const file = result.rows[0];
 
-    const absolutePath = path.join(__dirname, file.file_url.replace("/uploads", "uploads"));
-
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
+    await deleteFromR2(file.file_url);
 
     await pool.query("DELETE FROM airplane_files WHERE id = $1", [req.params.fileId]);
 
