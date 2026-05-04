@@ -2189,7 +2189,34 @@ app.delete("/staff-files/:fileId", authMiddleware, allowRoles("admin"), async (r
 
 app.delete("/farms/:id", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
-    const existing = await pool.query("SELECT * FROM farms WHERE id = $1", [req.params.id]);
+    const { password } = req.body;
+
+    if (!password) {
+      return res.status(400).json({ error: "Clave requerida para eliminar huerta" });
+    }
+
+    const userResult = await pool.query(
+      "SELECT * FROM users WHERE id = $1",
+      [req.user.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const passwordOk = await bcrypt.compare(
+      password,
+      userResult.rows[0].password_hash
+    );
+
+    if (!passwordOk) {
+      return res.status(401).json({ error: "Clave incorrecta" });
+    }
+
+    const existing = await pool.query(
+      "SELECT * FROM farms WHERE id = $1",
+      [req.params.id]
+    );
 
     if (existing.rows.length === 0) {
       return res.status(404).json({ error: "Huerta no encontrada" });
