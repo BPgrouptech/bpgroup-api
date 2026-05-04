@@ -1970,6 +1970,97 @@ app.put("/farm-cuts/:cutId/complete-price", authMiddleware, allowRoles("admin", 
     res.status(500).json({ error: err.message });
   }
 });
+app.put("/farm-cuts/:cutId", authMiddleware, allowRoles("admin", "agricola", "finanzas"), async (req, res) => {
+  try {
+    const {
+      cut_date,
+      color,
+      boxes_produced,
+      price_per_box,
+      buyer_company,
+      box_design,
+      observation
+    } = req.body;
+
+    if (!cut_date) {
+      return res.status(400).json({ error: "Fecha de corte obligatoria" });
+    }
+
+    if (boxes_produced === undefined || boxes_produced === null || boxes_produced === "") {
+      return res.status(400).json({ error: "Cajas producidas obligatorio" });
+    }
+
+    const existing = await pool.query(
+      "SELECT * FROM farm_cuts WHERE id = $1",
+      [req.params.cutId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Corte no encontrado" });
+    }
+
+    const yearMonth = getCutYearMonth(cut_date);
+
+    if (!yearMonth) {
+      return res.status(400).json({ error: "Fecha de corte inválida" });
+    }
+
+    const boxes = Number(boxes_produced || 0);
+
+    let price = existing.rows[0].price_per_box || 0;
+
+    if (canSeeMoney(req.user.role)) {
+      price = Number(price_per_box || 0);
+    }
+
+    const grossIncome = boxes * price;
+
+    const status = canSeeMoney(req.user.role)
+      ? "COMPLETO"
+      : existing.rows[0].status || "PENDIENTE_FINANZAS";
+
+    const result = await pool.query(
+      `
+      UPDATE farm_cuts
+      SET cut_date = $1,
+          cut_year = $2,
+          cut_month = $3,
+          color = $4,
+          boxes_produced = $5,
+          price_per_box = $6,
+          buyer_company = $7,
+          box_design = $8,
+          gross_income = $9,
+          observation = $10,
+          status = $11,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $12
+      RETURNING *
+      `,
+      [
+        cut_date,
+        yearMonth.year,
+        yearMonth.month,
+        color || null,
+        boxes,
+        price,
+        buyer_company || null,
+        box_design || null,
+        grossIncome,
+        observation || null,
+        status,
+        req.params.cutId
+      ]
+    );
+
+    res.json({
+      message: "Corte actualizado correctamente",
+      cut: result.rows[0]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.delete("/farm-cuts/:cutId", authMiddleware, allowRoles("admin"), async (req, res) => {
   try {
